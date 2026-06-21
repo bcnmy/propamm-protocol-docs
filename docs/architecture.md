@@ -1,172 +1,67 @@
 # PropAMM Architecture
 
-PropAMM is an intent-based settlement protocol for streaming-priced market makers on EVM L2s. A trader signs ONE EIP-712 message. An orchestrator builds the calldata that achieves the trader's intent at the best price. Settlement enforces a single guarantee — the receiver gets at least `minAmountOut` of `tokenOut`, or the intent reverts.
+PropAMM is an intent-based settlement layer for streaming-priced market makers on EVM L2s. A user signs one message. A market maker streams signed prices. Everything in between, routing, ordering, gas, and settlement, is handled for them. The settlement layer guarantees one thing: the user receives at least the minimum they signed for, or nothing moves.
 
-## The single signature
+This is a high-level overview. For what an MM implements, see the [integration guide](./integration.md).
 
-Every swap is one EIP-712 signature: a Permit2 `PermitWitnessTransferFrom` whose witness is the `Intent` struct.
+## Three ideas
 
-```
-Intent {
-    address trader        // signer
-    address receiver      // where tokenOut goes
-    address tokenIn
-    uint256 amountIn
-    address tokenOut
-    uint256 minAmountOut  // floor; settlement-enforced
-    address executor      // who can submit; 0 = anyone
-    uint256 deadline
-    uint256 nonce         // Permit2 nonce
-}
-```
+### One signature, full abstraction
 
-The wallet renders it legibly. The signature authorises:
-- Permit2 to pull up to `amountIn` of `tokenIn` (once)
-- The intent's semantics (receiver, tokenOut, minAmountOut, deadline)
-- The executor binding (`msg.sender` must equal `intent.executor`, or `intent.executor == 0` for permissionless)
+A user signs a single EIP-712 intent: the token they are selling, the amount, the token they want, and the minimum they will accept. That is the entire user-facing surface. They do not pick a route, choose a market maker, send transactions, or hold gas.
 
-No second tx is required from the trader. A one-time Permit2 approval per `tokenIn` (or a signed EIP-2612 permit chained into the same tx for first-time users) is the only setup.
+A market maker signs and streams prices over a WebSocket. That is the entire MM-facing surface. They do not send transactions or pay gas either.
 
-## The settle entry
+Between those two signatures, our orchestrator builds the route off-chain and our settlement contracts execute it on-chain. The user's one approval, ever, is a one-time Permit2 approval per token, or a signed permit folded into the same transaction for first-time users.
 
-```
-PropAMMSettlement.settleBatch(
-    Step[]   preHook,           // runs once per batch (e.g. commit MM PriceUpdates)
-    Intent[] intents,
-    Step[][] perIntentSteps     // calldata that fulfils each intent
-)
-```
+### ERC-8211 routing with the user's guards built in
 
-A `Step` is `(to, value, data, isDelegatecall)`. Settlement is generic — it doesn't know about MMs, executors, or venues. It enforces:
+For each intent we build the execution using ERC-8211 composable calldata. This is what lets a single intent be fulfilled by a proprietary market maker, an external venue, a split across both, or a composed flow such as a fee split that reads balances at execution time. The route is chosen for best execution.
 
-1. `msg.sender == intent.executor` (or `executor == 0`)
-2. `block.timestamp <= intent.deadline`
-3. Per-intent `try/catch` — a revert in one intent doesn't roll back adjacent intents
-4. Receiver balance snapshot: `receiver.balanceOf(tokenOut)` delta must be ≥ `intent.minAmountOut`
-5. Delegatecall step targets must be on an owner-managed whitelist
+The user's protections travel inside that execution and are enforced by the settlement contract:
 
-The preHook runs once per batch and is NOT isolated — a revert in the preHook aborts the whole batch. Its primary use is to commit fresh MM PriceUpdates to anchors before the per-intent dispatch.
+- The receiver must end up with at least the signed minimum, or the whole intent reverts.
+- Token pulls are bounded by exactly what the user signed, through Permit2. The settlement contract never holds a standing approval to user funds.
+- Composable steps can only touch targets we explicitly allow.
+- Each intent in a batch is isolated. One failing intent reverts on its own and does not affect the others.
 
-## The components
+### Same-block price freshness, enforced on-chain
+
+The settlement layer enforces, on every market-maker fill, that the price it settles against was committed on-chain in the same block. We always commit the latest signed price first, in the same block, before the intent settles against it. A stale price cannot be used.
+
+This is enforced as a standard of EVM execution, checked deterministically by every node on the normal settle path, rather than as a custom block-builder service that depends on a particular builder winning the block. There is no MEV-Boost dependency and no builder market to maintain. This is what closes the cross-block stale-price vector that has been the dominant toxic-flow path on permissionless L2 propAMMs, and it is why market makers can quote tight without being picked off.
+
+## Components
 
 ```mermaid
 flowchart LR
-    EOA["Relayer EOA pool<br/>(N workers)"] -->|relayBatch| Relay["OrchestratorRelay"]
-    Relay -->|settleBatch| S["PropAMMSettlement"]
-    S -->|pull tokenIn| P2["Permit2"]
-    S -->|MM fill| Exec["PropAMMExecutor"]
-    S -.->|or route via| Venues["External venues /<br/>ERC-8211 helpers"]
+    U["User<br/>signs one intent"] --> O["Orchestrator<br/>(off-chain): routing + ordering"]
+    MM["Market Maker<br/>streams signed prices"] --> O
+    O --> S["Settlement<br/>(on-chain): enforces guards"]
+    S --> Prov["MM provider<br/>(MM inventory + pricing)"]
+    S -.-> Venues["External venues /<br/>ERC-8211 helpers"]
+    S --> R["Receiver gets >= minimum,<br/>or revert"]
 ```
 
-Settlement is the hub: relayer EOAs reach it through `OrchestratorRelay`, it pulls `tokenIn` through Permit2, and it dispatches each intent's `Step[]` to `PropAMMExecutor` (streaming MM), external venues (Uniswap, Curve), ERC-8211 composable-execution helpers (owner-allowlisted delegatecall), or any mix.
+- **Orchestrator (off-chain).** Consumes the MM price stream, builds the best-execution route for each intent, orders the price commit ahead of the fill, and submits on-chain. Pays gas. This is the component a user or MM never sees.
+- **Settlement (on-chain).** Executes the route and enforces every user guard above. It does not price trades, choose counterparties, or hold funds.
+- **MM provider (on-chain).** A small contract each market maker deploys. It holds inventory and decides the output it delivers from the committed price. The market maker owns pricing entirely; the protocol never prices on their behalf.
+- **External venues and ERC-8211 helpers.** A route can include external liquidity or composable helpers (for example a runtime-balance fee split), composed into the same execution.
 
-### PropAMMSettlement
+## What is guaranteed to whom
 
-Generic intent-batch dispatcher. Holds zero standing approvals. Per-intent try/catch. Owner-managed delegatecall whitelist. Receiver-snapshot delivery floor.
+| Concern | Guarantee |
+|---|---|
+| User: getting a fair fill | Receiver gets at least the signed minimum, or the intent reverts. |
+| User: fund safety | Pulls are bounded by the signed amount via Permit2. No standing approval to settlement. |
+| Market maker: stale-price pickoff | Fills settle only against a price committed in the same block. Old prices cannot be used. |
+| Market maker: pricing freedom | The MM decides the delivered output from the committed price. The protocol imposes no cap. |
+| Both: one bad fill | Per-intent isolation. A failing intent reverts alone; the rest of the batch proceeds. |
 
-### PropAMMExecutor
-
-Streaming-MM module. Two narrow entry points:
-- `updatePrices(PriceUpdate[], bytes[])` — permissionless, idempotent. Commits MM-signed PUs to per-`(mm, tokenIn, tokenOut)` anchors. Same-block freshness: `anchor.commitBlock == block.number`.
-- `fillFromAnchor(provider, tokenIn, tokenOut, amountIn, receiver)` — reads the freshly-committed anchor, computes `amountOut = amountIn * price / 1e18`, grants exact-amount approval to the MM provider, invokes `IMMProvider.executeSwap`, then revokes. No standing approvals.
-
-### OrchestratorRelay
-
-Fronting contract for the orchestrator's pool of relayer EOAs. Users sign `intent.executor = OrchestratorRelay` once at quote time; the orchestrator rotates through N relayer EOAs in parallel behind that one address. `msg.sender == OrchestratorRelay` regardless of which underlying EOA submitted, so the executor binding holds without re-signing on key rotation.
-
-### MM provider (IMMProvider)
-
-A small (~100 LoC) contract each MM deploys. Two functions:
-- `signer()` — returns the address whose key signs PriceUpdates. EOA or EIP-1271.
-- `executeSwap(...)` — gated by `msg.sender == approvedExecutor`. Pulls `amountIn` of `tokenIn` from the executor and sends `amountOut` of `tokenOut` from the MM's inventory to the receiver.
-
-There is no protocol-side MM registry. The orchestrator's off-chain routing decides which MMs see flow.
-
-## What gets composed inside Step[]
-
-Settlement's generic `Step[]` dispatch is what makes the protocol composable. Any combination works:
-
-**Streaming-MM happy path (the production default):**
-```
-preHook: [updatePrices(PUs, sigs)]
-steps:   [Permit2.permitWitnessTransferFrom,
-          tokenIn.transfer(executor),
-          PropAMMExecutor.fillFromAnchor]
-```
-
-**External venue:**
-```
-preHook: []   // no anchor needed if route is venue-only
-steps:   [Permit2.permitWitnessTransferFrom,
-          tokenIn.approve(UniswapRouter),
-          UniswapRouter.exactInputSingle(receiver=intent.receiver),
-          tokenIn.approve(UniswapRouter, 0)]
-```
-
-**Mixed route — half through PropAMM MM, half through Uniswap:**
-```
-steps: [Permit2 pull,
-        transfer half to PropAMM executor,
-        fillFromAnchor for first half,
-        approve Uniswap for second half,
-        Uniswap swap for second half,
-        revoke Uniswap approval]
-```
-
-**ERC-8211 composability (fee split via runtime balance read):**
-```
-steps: [Permit2 pull,
-        transfer tokenIn to PropAMM executor,
-        fillFromAnchor — delivers tokenOut to SETTLEMENT (not user!),
-        delegatecall ComposableExecutionModule.executeComposableDelegateCall([
-            transfer(FEE_COLLECTOR, FIXED_FEE),
-            transfer(USER, balanceOf(SETTLEMENT, tokenOut))  // runtime read
-        ])]
-```
-
-The delegatecall target (ERC-8211 module) must be on the owner-managed whitelist. The runtime balance read resolves to settlement's actual balance at execution time, so the user gets exactly `(totalOut - FEE)` regardless of slippage. Settlement holds zero residual after sweep.
-
-## Trust model
-
-| Layer | Protects against | How |
-|---|---|---|
-| Permit2 witness binding | Cross-user drain via standing approvals to settlement | Users never approve settlement directly; only Permit2. Each per-intent sig binds the exact `(token, amount, intent)`. |
-| Signed executor field | MEV hijack of orchestrator-built calldata | `msg.sender == intent.executor` check per intent. Permissionless settle (executor=0) is opt-in by trader. |
-| Per-intent try/catch | One bad intent poisoning the batch | External self-call rolls back the failed intent's state changes; other intents proceed. |
-| Receiver snapshot | Misrouted output, underdelivery | `receiver.balanceOf(tokenOut)` delta must be ≥ `intent.minAmountOut`, else revert. |
-| Delegatecall whitelist | Arbitrary delegatecall takeover of settlement | Only owner-allowlisted addresses can be delegatecall targets. |
-| Same-block anchor freshness | Stale price front-runs | `PropAMMExecutor` requires `anchor.commitBlock == block.number` per fill. |
-| Monotonic PU nonce | Cross-block PU replay | `PropAMMExecutor` rejects non-monotonic PriceUpdates per `(mm, tokenIn, tokenOut)`. |
-
-## Three relay modes
-
-| Mode | `intent.executor` | Who submits | Use case |
-|---|---|---|---|
-| Orchestrator-relayed | `OrchestratorRelay` address | One of N relayer EOAs the orchestrator owns | Default UX; gasless from the trader's perspective |
-| Self-relay | trader's own EOA | Trader's wallet submits `settleBatch` directly | Trader wants no orchestrator dependency |
-| Permissionless | `address(0)` | Anyone | Trader opts in to MEV exposure for guaranteed inclusion |
-
-Self-relay supports two sub-patterns:
-- **Self-PU**: trader builds preHook with their own signed PU (signed by an MM key the trader has authority over, or queried from an MM via off-chain RFQ). Works 100% reliably.
-- **Piggyback**: trader submits with empty preHook and relies on a recent orchestrator-committed anchor. Works only when the trader's tx lands in the same block as an orch batch tx. Reliable when the pair has continuous orchestrator activity; intermittent otherwise.
-
-## Orchestrator surplus
-
-The trader signs `minAmountOut` as the floor. Anything above that delivered to the receiver is surplus. The orchestrator's quote engine sizes the route expecting some `quoted_output > minAmountOut`; the orchestrator's calldata routes the spread to its revenue collector (typically via a final Step that transfers exactly `minAmountOut` to the receiver and the remainder to the collector).
-
-Signed-executor binding ensures the orchestrator captures the surplus, not an MEV bot. A compromised relayer EOA bounds attacker gain per intent to the same spread. Permit2 bounds the per-intent pull amount.
-
-## What the protocol does NOT do
-
-- No on-chain MM registry. The orchestrator's off-chain routing decides which MMs see flow.
-- No protocol-side approval to user tokens. All pulls go through Permit2.
-- No baked-in protocol fee. Fees are calldata Steps the orchestrator includes.
-- No native I/O wrapper. ETH input is self-relayed (user sends `msg.value`); orchestrator's first step is `WETH9.deposit{value: amountIn}`.
-- No allowlist on `settleBatch`. The per-intent executor binding is the only access control.
+Trust concentrates on the market maker's signing key. Every other component is signature-enforced or has no authority over funds.
 
 ## Reference
 
 - Protocol source: `bcnmy/propamm-protocol`
-- Public docs site: `bcnmy/propamm-protocol-docs` (this repo)
+- MM integration: [integration.md](./integration.md)
 - ERC-8211 composability standard: <https://erc8211.com/>
-- ERC-8211 SDK: `@biconomy/smart-batching`

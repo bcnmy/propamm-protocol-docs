@@ -1,241 +1,151 @@
-# PropAMM Integration Guide
+# PropAMM MM Integration
 
-This document covers what an integrator needs to do to plug into PropAMM — as a market maker (deploying a provider contract + signing PriceUpdates), as an aggregator/wallet (routing user orders through the orchestrator's HTTP intake), or as a trader self-relaying intents without orchestrator dependency.
+What a market maker implements to go live. There are two integration points and nothing else:
 
-It assumes familiarity with the conceptual architecture from the companion architecture document.
+1. **A provider contract** you deploy, which holds your inventory and delivers your output.
+2. **A signed price stream** you publish over WebSocket.
+
+You never send transactions, pay gas, or build routes. You stream prices and answer fills.
+
+> Aggregator and wallet integration (routing user orders through our orchestrator API) is a separate track and is still being finalised. This document covers the MM integration, which is stable at the contract level today.
 
 ---
 
-## For market makers
+## 1. The provider contract
 
-You bring pricing and inventory. The protocol provides the settlement substrate, the streaming-MM module, and the orchestrator. Plugging in is small.
-
-### TL;DR onboarding
-
-1. **Deploy** `BasicMMProvider` with constructor args `(signer, executor, owner)` where `executor = PropAMMExecutor` address.
-2. **Fund** the provider with `tokenOut` inventory for every pair you'll quote.
-3. **Connect** your signer process to the orchestrator's WebSocket and stream signed `PriceUpdate`s.
-
-No on-chain registration tx. The orchestrator decides routing off-chain — it consumes your signed price stream and includes your PUs in batch preHooks.
-
-### The provider contract
-
-The reference template (`BasicMMProvider`) is ~100 LoC. Two functions matter:
+You deploy one contract that holds your `tokenOut` inventory and exposes a single fill hook. It implements three functions.
 
 ```solidity
-function signer() external view returns (address);  // EOA or EIP-1271
+interface IMMProvider {
+    // The address whose key signs your price updates. EOA or EIP-1271 contract.
+    function signer() external view returns (address);
 
+    // Off-chain quote helper. Returns the output your executeSwap would deliver for these
+    // inputs right now, so routing reflects what the user will actually receive.
+    function previewSwap(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 anchorPrice
+    ) external view returns (uint256 amountOut);
+
+    // The fill. Pull amountIn from the caller, deliver your chosen output to receiver.
+    function executeSwap(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 anchorPrice,
+        address receiver
+    ) external returns (uint256 delivered);
+}
+```
+
+### executeSwap: you own the pricing
+
+`executeSwap` is the only place your contract does work. The flow inside it:
+
+1. Require `msg.sender == approvedExecutor`. This is your entire security boundary. Only the executor you trust can call you.
+2. Pull `amountIn` of `tokenIn` from the caller.
+3. Compute the output you want to deliver from `anchorPrice` (the fresh, same-block price, 1e18-scaled as tokenOut per tokenIn) plus any curve, spread, or inventory logic of your own.
+4. Send that output of `tokenOut` from your inventory to `receiver`, and return the amount.
+
+You decide the output. The protocol does not price the trade for you and imposes no cap on what you deliver. A minimal MM with no curve just returns `amountIn * anchorPrice / 1e18`. An MM with a curve applies it here, and implements `previewSwap` to return the same number so routing quotes match execution.
+
+A minimal reference implementation:
+
+```solidity
 function executeSwap(
     address tokenIn,
     address tokenOut,
     uint256 amountIn,
-    uint256 amountOut,
+    uint256 anchorPrice,
     address receiver
-) external {
-    require(msg.sender == approvedExecutor);
+) external returns (uint256 delivered) {
+    require(msg.sender == approvedExecutor, "not executor");
     SafeTransferLib.safeTransferFrom(tokenIn, msg.sender, address(this), amountIn);
-    SafeTransferLib.safeTransfer(tokenOut, receiver, amountOut);
+    delivered = (amountIn * anchorPrice) / 1e18;   // your pricing goes here
+    SafeTransferLib.safeTransfer(tokenOut, receiver, delivered);
 }
 ```
 
-Only `approvedExecutor` (the `PropAMMExecutor` address) may call `executeSwap`. The MM controls `approvedExecutor` via the owner key. If the executor is ever compromised, the MM can rotate to a new executor in one tx.
+### Onboarding
 
-For an MM with non-trivial pricing logic (curves, inventory skew, drift), override `previewSwap` (off-chain quote helper) and override `executeSwap` to enforce the MM's actual delivery math.
+1. Deploy your provider with `(signer, executor, owner)`. `executor` is the `PropAMMExecutor` address; the constructor sets it as your `approvedExecutor`.
+2. Fund the contract with `tokenOut` inventory for every pair you quote.
+3. Start streaming signed prices (next section).
 
-### PriceUpdate format
+There is no on-chain registration step.
+
+### Key rotation
+
+- Rotate your signing key with `setSigner(newSigner)`, one owner transaction. Later price updates must be signed by the new key.
+- Rotate the trusted executor with `setApprovedExecutor(newExecutor)`, one owner transaction. Use an owner multisig in production.
+
+---
+
+## 2. The price stream
+
+You publish signed `PriceUpdate` messages over a WebSocket. Each is an EIP-712 typed message.
 
 ```solidity
 struct PriceUpdate {
-    address mm;         // your signer; matches IMMProvider.signer()
+    address mm;         // your signer; must match provider.signer()
     address tokenIn;
     address tokenOut;
-    uint256 price;      // 1e18-scaled: amountOut = amountIn * price / 1e18
+    uint256 price;      // 1e18-scaled, tokenOut per tokenIn
     uint256 nonce;      // monotonic per (mm, tokenIn, tokenOut)
-    uint256 expiresAt;  // unix milliseconds
+    uint256 expiresAt;  // unix milliseconds, your wall-time validity cap
 }
 ```
 
-Signed against `PropAMMExecutor`'s EIP-712 domain (`name: "PropAMMExecutor"`, `version: "1"`, `verifyingContract: <PropAMMExecutor>`). Reference signing helper: `_signPriceUpdate` in the protocol test base.
+Signed against the `PropAMMExecutor` EIP-712 domain:
 
-**Nonce hygiene:**
-- Monotonic per `(mm signer, tokenIn, tokenOut)`. Don't reuse.
-- Stale-nonce PUs (lower than the committed anchor) are silent no-ops on chain — safe to mempool-stack.
-- Same-block re-commits with the same nonce are also no-ops. Parallel orchestrator workers race-free.
+```
+name:              "PropAMMExecutor"
+version:           "1"
+verifyingContract: <PropAMMExecutor address>
+chainId:           <chain id>
+```
 
-**Same-block freshness:**
-The orchestrator includes your latest PU in the batch's preHook. `PropAMMExecutor` enforces `anchor.commitBlock == block.number` at fill time. Your PU is therefore committed in the same tx that consumes it — you never need to land transactions yourself.
+### Nonce hygiene
 
-### Rotating keys
+- Nonces are monotonic per `(signer, tokenIn, tokenOut)`. Do not reuse.
+- A price update with a nonce at or below the latest committed one is ignored on-chain, so a delayed update can never overwrite a fresher one.
+- Publish at a steady cadence. The fresher your stream, the more flow you can serve at any moment.
 
-- Rotate the signing key: `mmProvider.setSigner(newSigner)`. One owner tx. Subsequent PUs must be signed by the new key.
-- Rotate the trusted executor (e.g. on protocol upgrade): `mmProvider.setApprovedExecutor(newExecutor)`. One owner tx.
+### You never land transactions
 
-Use an owner multisig in production.
+Your price commits to the chain inside the same transaction that settles the user's fill, committed before the fill in the same block. You only sign and stream. The freshness guarantee (next section) is enforced for you.
 
 ---
 
-## For aggregators / wallets
+## 3. One fill, from your point of view
 
-You want users to swap through the orchestrator with one signature.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant MM as You (Market Maker)
+    participant Sys as PropAMM (orchestrator + settlement)
+    participant U as User
 
-### The flow
-
-1. **Quote.** Hit the orchestrator's `/v3/quote` with `(trader, tokenIn, tokenOut, amountIn)`. Get back an Intent template (`executor`, `minAmountOut`, `deadline`, `nonce`).
-
-2. **Sign.** Trader EIP-712 signs ONE `PermitWitnessTransferFrom` whose witness is the `Intent` struct. Your wallet integration code constructs the digest and calls `signTypedData`.
-
-   The witness type string:
-   ```
-   Intent(address trader,address receiver,address tokenIn,uint256 amountIn,address tokenOut,uint256 minAmountOut,address executor,uint256 deadline,uint256 nonce)
-   ```
-
-3. **Submit.** POST `{ intent, signature }` to the orchestrator's `/v3/intents`. Watch for `IntentSettled` on the settlement contract.
-
-### Approvals
-
-The trader's only on-chain approval, ever, is `tokenIn.approve(Permit2, max)`. Once per token, lifetime. If they've used any other Permit2-based protocol (Uniswap X, 1inch, …) with that token, the approval is already in place.
-
-For first-time users on tokens with EIP-2612 permit support, chain the permit into the intent's Step[]:
-```
-preHook: [updatePrices(...)]
-steps: [
-    tokenIn.permit(owner=trader, spender=Permit2, value=max, deadline, v, r, s),
-    Permit2.permitWitnessTransferFrom(...),
-    ...
-]
+    Note over MM,Sys: you stream signed PriceUpdates over WebSocket
+    U->>Sys: signs an intent to swap
+    Note over Sys: commits your latest price on-chain, same block, before the fill
+    Sys->>MM: executeSwap(tokenIn, tokenOut, amountIn, anchorPrice, receiver)
+    MM-->>U: delivers your output of tokenOut to the user
+    Note over Sys: checks the user got at least their minimum, else the whole fill reverts
 ```
 
-Validated live: a trader with `Permit2 allowance == 0` can settle their intent in one tx by chaining a signed permit + the intent witness. Fully gasless from the trader's perspective.
+What this gives you:
 
-### Failure modes the UI should handle
-
-| Selector | Error | Meaning | UI guidance |
-|---|---|---|---|
-| `0x905c74a0` | `ExecutorMismatch` | UI submitted to wrong settle entry | Bug — verify orchestrator config |
-| `0x408b2234` | `IntentExpired` | Trader took too long between quote and submit | Re-quote |
-| `0x2c19b8b8` | `InsufficientOutput` | Price moved against the trader | Re-quote; offer looser slippage |
-| `0x9090268d` | `AnchorStale` | preHook didn't commit an anchor in this block | Orchestrator-side; transient |
-| `0x1ba4f179` | `InvalidPriceUpdateSignature` | MM key drifted or wrong domain | Operator-side |
-
-`IntentFailed(intentHash, errorSelector, reason)` events carry the per-intent failure. `IntentSettled(intentHash, ..., amountOut, ...)` carry the success. Both are indexed by `intentHash` — derive it client-side as `keccak256(abi.encode(Intent))` to correlate.
-
----
-
-## For traders self-relaying
-
-You can bypass the orchestrator entirely. Two patterns:
-
-### Self-PU: trader supplies the PriceUpdate
-
-Used when you want zero orchestrator dependency. You sign the PU as well as the Intent.
-
-```
-preHook: [PropAMMExecutor.updatePrices([yourPU], [yourPUSig])]
-steps:   [Permit2.permitWitnessTransferFrom,
-          tokenIn.transfer(executor),
-          PropAMMExecutor.fillFromAnchor(yourMMProvider, ...)]
-```
-
-Requires that you have an MM key (or queried one off-chain from an MM willing to sign). 100% reliable.
-
-### Piggyback: trader supplies no PU, relies on orchestrator activity
-
-You submit `preHook = []`. Your `fillFromAnchor` call expects an anchor with `commitBlock == block.number` — which will be present only if the orchestrator's batch lands in the same block as yours.
-
-Reliable for pairs with sustained orchestrator activity (orchestrator commits anchors in every block). For sparse pairs the user's tx may fail `AnchorStale` and need to retry.
-
-### Native ETH input
-
-Self-relay only. The trader sends `msg.value == amountIn` with `settleBatch`; the first Step is `WETH9.deposit{value: amountIn}` to wrap. Rest of the route treats WETH as the input token.
-
-```
-steps: [
-    { to: WETH, value: amountIn, data: deposit() },
-    { to: WETH, value: 0, data: transfer(executor, amountIn) },
-    { to: PropAMMExecutor, value: 0, data: fillFromAnchor(...) }
-]
-```
-
----
-
-## Step[] reference shapes
-
-### Streaming-MM (production default)
-
-```
-preHook: [updatePrices([pu], [puSig])]
-perIntentSteps: [[
-    Permit2.permitWitnessTransferFrom(...),
-    tokenIn.transfer(PropAMMExecutor, amountIn),
-    PropAMMExecutor.fillFromAnchor(mmProvider, tokenIn, tokenOut, amountIn, receiver)
-]]
-```
-
-### External venue (Uniswap V3 example)
-
-```
-preHook: []
-perIntentSteps: [[
-    Permit2.permitWitnessTransferFrom(...),
-    tokenIn.approve(UniswapRouter, amountIn),
-    UniswapRouter.exactInputSingle(...),
-    tokenIn.approve(UniswapRouter, 0)
-]]
-```
-
-### Mixed PropAMM + external venue (split route)
-
-```
-preHook: [updatePrices(...)]
-perIntentSteps: [[
-    Permit2.permitWitnessTransferFrom(...),
-    tokenIn.transfer(PropAMMExecutor, half),
-    PropAMMExecutor.fillFromAnchor(..., half, ...),
-    tokenIn.approve(UniswapRouter, half),
-    UniswapRouter.exactInputSingle(half, ...),
-    tokenIn.approve(UniswapRouter, 0)
-]]
-```
-
-### ERC-8211 fee-split (runtime balance read)
-
-Use the `@biconomy/smart-batching` SDK:
-
-```ts
-import { createComposableBatch } from "@biconomy/smart-batching";
-
-const batch = createComposableBatch(publicClient, SETTLEMENT);
-const usdc = batch.erc20Token(USDC);
-batch.add([
-  usdc.write({ functionName: "transfer", args: [FEE_COLLECTOR, FIXED_FEE] }),
-  usdc.write({
-    functionName: "transfer",
-    args: [user, usdc.runtimeBalance({ owner: SETTLEMENT })],
-  }),
-]);
-const composableCalls = await batch.toCalls();
-const compCalldata = encodeFunctionData({
-  abi: COMP_MODULE_DELEGATE_ABI,
-  functionName: "executeComposableDelegateCall",
-  args: [composableCalls],
-});
-
-// Then include in your Step[]:
-const steps = [
-    Permit2.permitWitnessTransferFrom(...),
-    tokenIn.transfer(PropAMMExecutor, amountIn),
-    PropAMMExecutor.fillFromAnchor(mmProvider, ..., receiver=SETTLEMENT),
-    { to: COMP_MODULE, value: 0, data: compCalldata, isDelegatecall: true }
-];
-```
-
-The ERC-8211 module (whitelisted as a delegatecall target) reads settlement's balance at execution time and splits dynamically. User gets `(totalOut - FIXED_FEE)`, fee collector gets `FIXED_FEE`, settlement holds zero residual. The user's `minAmountOut` is checked against the receiver's net delta.
+- **Same-block price freshness.** The settlement contract requires that the price your fill settles against was committed in the same block. A stale price cannot be used against you. This is what removes the toxic-flow pickoff that makes permissionless propAMMs unviable on L2s.
+- **You own output pricing.** The executor passes your fresh price and your input; you decide and deliver the output.
+- **The user is protected, so you are not exposed to bad fills.** Settlement enforces the user's signed minimum. If your output is below it, the fill reverts and nothing moves. You never deliver into a fill that would not also satisfy the user.
+- **Your signing key is the only sensitive surface.** Only your `approvedExecutor` can call `executeSwap`, and your owner key controls both that and rotations.
 
 ---
 
 ## Reference
 
-- `bcnmy/propamm-protocol` — settlement, executor, MM provider templates, orchestrator
-- `@biconomy/smart-batching` — ERC-8211 SDK
-- `bcnmy/erc8211-contracts` — ERC-8211 reference contracts
+- `bcnmy/propamm-protocol`: settlement, executor, and MM provider templates (`BasicMMProvider`, `DriftedMMProvider`)
 - ERC-8211 standard: <https://erc8211.com/>
