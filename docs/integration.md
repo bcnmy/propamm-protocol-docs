@@ -107,9 +107,13 @@ verifyingContract: <PropAMMExecutor address>
 chainId:           <chain id>
 ```
 
+### Stream both directions of a pair
+
+Prices are directional. The anchor is keyed by `(signer, tokenIn, tokenOut)`, so `WETH -> USDC` and `USDC -> WETH` are independent. To serve a pair both ways, stream both directions. A fill in a direction you are not streaming has no fresh anchor and cannot settle. If you only intend to serve one direction, stream only that one.
+
 ### Nonce hygiene
 
-- Nonces are monotonic per `(signer, tokenIn, tokenOut)`. Do not reuse.
+- Nonces are monotonic per `(signer, tokenIn, tokenOut)`, independently per direction. Do not reuse.
 - A price update with a nonce at or below the latest committed one is ignored on-chain, so a delayed update can never overwrite a fresher one.
 - Publish at a steady cadence. The fresher your stream, the more flow you can serve at any moment.
 
@@ -147,5 +151,6 @@ What this gives you:
 
 ## Reference
 
-- `bcnmy/propamm-protocol`: settlement, executor, and MM provider templates (`BasicMMProvider`, `DriftedMMProvider`)
 - ERC-8211 standard: <https://erc8211.com/>
+
+Contract interfaces and reference provider templates are shared on request.

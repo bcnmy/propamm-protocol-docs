@@ -62,6 +62,5 @@ Trust concentrates on the market maker's signing key. Every other component is s
 
 ## Reference
 
-- Protocol source: `bcnmy/propamm-protocol`
 - MM integration: [integration.md](./integration.md)
 - ERC-8211 composability standard: <https://erc8211.com/>

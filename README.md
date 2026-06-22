@@ -11,9 +11,10 @@ A user signs one EIP-712 intent. A market maker streams signed prices. Our orche
 
 ## Source
 
-- [`bcnmy/propamm-protocol`](https://github.com/bcnmy/propamm-protocol): contracts and reference templates.
 - [`bcnmy/erc8211-contracts`](https://github.com/bcnmy/erc8211-contracts): ERC-8211 reference contracts.
 - [`@biconomy/smart-batching`](https://www.npmjs.com/package/@biconomy/smart-batching): SDK for building ERC-8211 composable batches.
+
+Contract interfaces and reference provider templates are shared on request.
 
 ## Maintainers
 
