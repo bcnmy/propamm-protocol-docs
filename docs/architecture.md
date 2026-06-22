@@ -1,66 +1,72 @@
 # PropAMM Architecture
 
-PropAMM is an intent-based settlement layer for streaming-priced market makers on EVM L2s. A user signs one message. A market maker streams signed prices. Everything in between, routing, ordering, gas, and settlement, is handled for them. The settlement layer guarantees one thing: the user receives at least the minimum they signed for, or nothing moves.
+PropAMM is a settlement layer for market makers. You stream prices. We settle the trades against your inventory, on chain, with the protections and the gas handled for you. You keep full control of pricing.
 
-This is a high-level overview. For what an MM implements, see the [integration guide](./integration.md).
+This is the high-level picture. For exactly what you implement, see the [integration guide](./integration.md).
 
-## Three ideas
+## What we operate
 
-### One signature, full abstraction
+The settlement layer has two parts:
 
-A user signs a single EIP-712 intent: the token they are selling, the amount, the token they want, and the minimum they will accept. That is the entire user-facing surface. They do not pick a route, choose a market maker, send transactions, or hold gas.
+- **An off-chain orchestrator node.** It takes your streamed price updates and users' signed intents, commits your prices on chain, and drives settlement. You never run it or think about it.
+- **Trustless on-chain settlement contracts.** They settle each user intent using ERC-8211, with the guards and protections enforced in the contract: the user receives at least what they signed for or the trade reverts, and your inventory only ever moves on your own terms.
 
-A market maker signs and streams prices over a WebSocket. That is the entire MM-facing surface. They do not send transactions or pay gas either.
+You connect to the orchestrator and stream prices. That is the whole of your footprint.
 
-Between those two signatures, our orchestrator builds the route off-chain and our settlement contracts execute it on-chain. The user's one approval, ever, is a one-time Permit2 approval per token, or a signed permit folded into the same transaction for first-time users.
+## What you control, what we handle
 
-### ERC-8211 routing with the user's guards built in
+You control pricing, and only pricing:
 
-For each intent we build the execution using ERC-8211 composable calldata. This is what lets a single intent be fulfilled by a proprietary market maker, an external venue, a split across both, or a composed flow such as a fee split that reads balances at execution time. The route is chosen for best execution.
+- Stream EIP-712 signed price updates, at any cadence, for the pairs you support.
+- Decide the output your inventory contract delivers, on chain, with whatever pricing logic you want.
 
-The user's protections travel inside that execution and are enforced by the settlement contract:
+We handle everything else:
 
-- The receiver must end up with at least the signed minimum, or the whole intent reverts.
-- Token pulls are bounded by exactly what the user signed, through Permit2. The settlement contract never holds a standing approval to user funds.
-- Composable steps can only touch targets we explicitly allow.
-- Each intent in a batch is isolated. One failing intent reverts on its own and does not affect the others.
+- Committing your price updates on chain, efficiently.
+- Matching them with users' signed intents.
+- Landing the transactions reliably and paying the gas. The flow is gasless for you.
+- Ordering at the transaction level: your price update is committed before the order settles against it.
 
-### Same-block price freshness, enforced on-chain
+You never send a transaction, hold gas, or deal with chain infrastructure.
 
-The settlement layer enforces, on every market-maker fill, that the price it settles against was committed on-chain in the same block. We always commit the latest signed price first, in the same block, before the intent settles against it. A stale price cannot be used.
+## Same-block price freshness
 
-This is enforced as a standard of EVM execution, checked deterministically by every node on the normal settle path, rather than as a custom block-builder service that depends on a particular builder winning the block. There is no MEV-Boost dependency and no builder market to maintain. This is what closes the cross-block stale-price vector that has been the dominant toxic-flow path on permissionless L2 propAMMs, and it is why market makers can quote tight without being picked off.
+The settlement contract enforces, on every fill, that the price it settles against was committed on chain in the same block. We always commit your latest price first, in that same block, before any intent settles against it. A price older than the current block cannot be used.
 
-## Components
+This is what closes the toxic-flow gap. When volatility hits, latency bots try to trade against a stale on-chain price before the market maker refreshes it, pocketing the difference. Because your fresh price is committed in the same block as the fill and the contract rejects anything older, that stale-price window is gone. You can quote tight without being picked off.
+
+The rule lives in the contract and is checked by every node on the normal settle path. There is no dependency on a particular block builder or any off-chain ordering service.
+
+## The flow
 
 ```mermaid
-flowchart LR
-    U["User<br/>signs one intent"] --> O["Orchestrator<br/>(off-chain): routing + ordering"]
-    MM["Market Maker<br/>streams signed prices"] --> O
-    O --> S["Settlement<br/>(on-chain): enforces guards"]
-    S --> Prov["MM provider<br/>(MM inventory + pricing)"]
-    S -.-> Venues["External venues /<br/>ERC-8211 helpers"]
-    S --> R["Receiver gets >= minimum,<br/>or revert"]
+sequenceDiagram
+    autonumber
+    participant MM as You (Market Maker)
+    participant Sys as PropAMM settlement layer
+    participant U as User
+
+    Note over MM,Sys: you stream signed price updates (EIP-712), any cadence
+    U->>Sys: signs an intent to swap
+    Note over Sys: commits your latest price on chain, same block, before the fill
+    Sys->>MM: calls your inventory contract with the input and the fresh price
+    MM-->>U: your contract delivers your priced output
+    Note over Sys: enforces the user got at least their minimum, or the fill reverts
 ```
 
-- **Orchestrator (off-chain).** Consumes the MM price stream, builds the best-execution route for each intent, orders the price commit ahead of the fill, and submits on-chain. Pays gas. This is the component a user or MM never sees.
-- **Settlement (on-chain).** Executes the route and enforces every user guard above. It does not price trades, choose counterparties, or hold funds.
-- **MM provider (on-chain).** A small contract each market maker deploys. It holds inventory and decides the output it delivers from the committed price. The market maker owns pricing entirely; the protocol never prices on their behalf.
-- **External venues and ERC-8211 helpers.** A route can include external liquidity or composable helpers (for example a runtime-balance fee split), composed into the same execution.
+## What you get
 
-## What is guaranteed to whom
-
-| Concern | Guarantee |
+| | |
 |---|---|
-| User: getting a fair fill | Receiver gets at least the signed minimum, or the intent reverts. |
-| User: fund safety | Pulls are bounded by the signed amount via Permit2. No standing approval to settlement. |
-| Market maker: stale-price pickoff | Fills settle only against a price committed in the same block. Old prices cannot be used. |
-| Market maker: pricing freedom | The MM decides the delivered output from the committed price. The protocol imposes no cap. |
-| Both: one bad fill | Per-intent isolation. A failing intent reverts alone; the rest of the batch proceeds. |
+| Gasless | You never send a transaction or hold gas. We land everything and pay for it. |
+| You own pricing | You set the output your inventory delivers, on chain, with any logic you want. |
+| Protected from stale-price pickoff | Fills settle only against a price committed in the same block. Old prices cannot be used. |
+| Plug and play | You stream signed prices and run a small inventory contract. Nothing else. |
+| In control | Only your approved executor can move your inventory, and only on your terms. |
 
-Trust concentrates on the market maker's signing key. Every other component is signature-enforced or has no authority over funds.
+Your signing key is the only sensitive surface on your side. Everything else is enforced by the contracts or handled by us.
 
 ## Reference
 
 - MM integration: [integration.md](./integration.md)
-- ERC-8211 composability standard: <https://erc8211.com/>
+- ERC-8211 standard: <https://erc8211.com/>

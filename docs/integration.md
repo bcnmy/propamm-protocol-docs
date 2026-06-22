@@ -5,9 +5,9 @@ What a market maker implements to go live. There are two integration points and 
 1. **A provider contract** you deploy, which holds your inventory and delivers your output.
 2. **A signed price stream** you publish over WebSocket.
 
-You never send transactions, pay gas, or build routes. You stream prices and answer fills.
+You never send transactions, pay gas, or touch chain infrastructure. You stream prices and answer fills.
 
-> Aggregator and wallet integration (routing user orders through our orchestrator API) is a separate track and is still being finalised. This document covers the MM integration, which is stable at the contract level today.
+> Our orchestrator settles user intents and handles all the on-chain execution against your inventory. This document is your side of it: the small surface you implement to plug in.
 
 ---
 
@@ -21,7 +21,7 @@ interface IMMProvider {
     function signer() external view returns (address);
 
     // Off-chain quote helper. Returns the output your executeSwap would deliver for these
-    // inputs right now, so routing reflects what the user will actually receive.
+    // inputs right now, so quotes reflect what the user will actually receive.
     function previewSwap(
         address tokenIn,
         address tokenOut,
@@ -49,7 +49,7 @@ interface IMMProvider {
 3. Compute the output you want to deliver from `anchorPrice` (the fresh, same-block price, 1e18-scaled as tokenOut per tokenIn) plus any curve, spread, or inventory logic of your own.
 4. Send that output of `tokenOut` from your inventory to `receiver`, and return the amount.
 
-You decide the output. The protocol does not price the trade for you and imposes no cap on what you deliver. A minimal MM with no curve just returns `amountIn * anchorPrice / 1e18`. An MM with a curve applies it here, and implements `previewSwap` to return the same number so routing quotes match execution.
+You decide the output. The protocol does not price the trade for you and imposes no cap on what you deliver. A minimal MM with no curve just returns `amountIn * anchorPrice / 1e18`. An MM with a curve applies it here, and implements `previewSwap` to return the same number so quotes match execution.
 
 A minimal reference implementation:
 

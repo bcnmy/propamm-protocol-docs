@@ -2,11 +2,11 @@
 
 Documentation for **PropAMM**: an intent-based settlement layer for streaming-priced market makers on EVM L2s.
 
-A user signs one EIP-712 intent. A market maker streams signed prices. Our orchestrator routes and our settlement contracts execute, with one guarantee: the receiver gets at least the minimum they signed for, or the intent reverts.
+A market maker streams signed prices. Our orchestrator settles user intents and handles the on-chain execution against the MM's inventory, with one guarantee: the user gets at least the minimum they signed for, or the trade reverts.
 
 ## Contents
 
-- [docs/architecture.md](docs/architecture.md): high-level architecture. The three ideas (one-signature abstraction, ERC-8211 routing with user guards, same-block price freshness), the components, and what is guaranteed to whom.
+- [docs/architecture.md](docs/architecture.md): high-level architecture. What we operate (off-chain orchestrator + on-chain settlement contracts using ERC-8211), what you control versus what we handle, same-block price freshness, and what you get as an MM.
 - [docs/integration.md](docs/integration.md): what a market maker implements. The provider contract interface and the signed price stream, with the fill dynamics from the MM's point of view.
 
 ## Source
