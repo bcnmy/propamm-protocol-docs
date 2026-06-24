@@ -1,13 +1,13 @@
-# PropAMM MM Integration
+# Biconomy PropAMM: MM Integration
 
-What a market maker implements to go live. There are two integration points and nothing else:
+What a market maker implements to run a proprietary AMM on Biconomy PropAMM. There are two integration points and nothing else:
 
 1. **A provider contract** you deploy, which holds your inventory and delivers your output.
 2. **A signed price stream** you publish over WebSocket.
 
-You never send transactions, pay gas, or build routes. You stream prices and answer fills.
+You stream prices and answer fills. Biconomy PropAMM submits the transactions and pays the gas.
 
-> Aggregator and wallet integration (routing user orders through our orchestrator API) is a separate track and is still being finalised. This document covers the MM integration, which is stable at the contract level today.
+> Biconomy PropAMM settles user intents and handles all the on-chain execution against your inventory. This document is your side of it: the small surface you implement to plug in.
 
 ---
 
@@ -21,7 +21,7 @@ interface IMMProvider {
     function signer() external view returns (address);
 
     // Off-chain quote helper. Returns the output your executeSwap would deliver for these
-    // inputs right now, so routing reflects what the user will actually receive.
+    // inputs right now, so quotes reflect what the user will actually receive.
     function previewSwap(
         address tokenIn,
         address tokenOut,
@@ -40,16 +40,16 @@ interface IMMProvider {
 }
 ```
 
-### executeSwap: you own the pricing
+### executeSwap
 
-`executeSwap` is the only place your contract does work. The flow inside it:
+`executeSwap` performs the fill:
 
-1. Require `msg.sender == approvedExecutor`. This is your entire security boundary. Only the executor you trust can call you.
+1. Require `msg.sender == approvedExecutor`.
 2. Pull `amountIn` of `tokenIn` from the caller.
-3. Compute the output you want to deliver from `anchorPrice` (the fresh, same-block price, 1e18-scaled as tokenOut per tokenIn) plus any curve, spread, or inventory logic of your own.
-4. Send that output of `tokenOut` from your inventory to `receiver`, and return the amount.
+3. Compute the output from `anchorPrice` (the committed same-block price, 1e18-scaled as tokenOut per tokenIn) and any pricing logic you apply.
+4. Send that `tokenOut` from inventory to `receiver` and return the amount.
 
-You decide the output. The protocol does not price the trade for you and imposes no cap on what you deliver. A minimal MM with no curve just returns `amountIn * anchorPrice / 1e18`. An MM with a curve applies it here, and implements `previewSwap` to return the same number so routing quotes match execution.
+The settlement contract does not compute or cap the output. With no curve it is `amountIn * anchorPrice / 1e18`; with a curve, apply it here and return the same value from `previewSwap` so quotes match execution.
 
 A minimal reference implementation:
 
@@ -117,40 +117,31 @@ Prices are directional. The anchor is keyed by `(signer, tokenIn, tokenOut)`, so
 - A price update with a nonce at or below the latest committed one is ignored on-chain, so a delayed update can never overwrite a fresher one.
 - Publish at a steady cadence. The fresher your stream, the more flow you can serve at any moment.
 
-### You never land transactions
+### Your price commits inside the settlement transaction
 
-Your price commits to the chain inside the same transaction that settles the user's fill, committed before the fill in the same block. You only sign and stream. The freshness guarantee (next section) is enforced for you.
+Your price commits to the chain inside the same transaction that settles the user's fill, before the fill, in the same block. You sign and stream; Biconomy PropAMM does the on-chain commit and submission.
 
 ---
 
-## 3. One fill, from your point of view
+## 3. One fill
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant MM as You (Market Maker)
+    participant MM as Market Maker
     participant Sys as PropAMM (orchestrator + settlement)
     participant U as User
 
-    Note over MM,Sys: you stream signed PriceUpdates over WebSocket
+    Note over MM,Sys: market maker streams signed PriceUpdates over WebSocket
     U->>Sys: signs an intent to swap
-    Note over Sys: commits your latest price on-chain, same block, before the fill
+    Note over Sys: commits the latest price on-chain, same block, before the fill
     Sys->>MM: executeSwap(tokenIn, tokenOut, amountIn, anchorPrice, receiver)
-    MM-->>U: delivers your output of tokenOut to the user
-    Note over Sys: checks the user got at least their minimum, else the whole fill reverts
+    MM-->>U: inventory contract delivers the output to the user
+    Note over Sys: enforces the user got at least their minimum, else the fill reverts
 ```
-
-What this gives you:
-
-- **Same-block price freshness.** The settlement contract requires that the price your fill settles against was committed in the same block. A stale price cannot be used against you. This is what removes the toxic-flow pickoff that makes permissionless propAMMs unviable on L2s.
-- **You own output pricing.** The executor passes your fresh price and your input; you decide and deliver the output.
-- **The user is protected, so you are not exposed to bad fills.** Settlement enforces the user's signed minimum. If your output is below it, the fill reverts and nothing moves. You never deliver into a fill that would not also satisfy the user.
-- **Your signing key is the only sensitive surface.** Only your `approvedExecutor` can call `executeSwap`, and your owner key controls both that and rotations.
 
 ---
 
 ## Reference
 
 - ERC-8211 standard: <https://erc8211.com/>
-
-Contract interfaces and reference provider templates are shared on request.
