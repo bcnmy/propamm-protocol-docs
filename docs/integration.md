@@ -94,7 +94,7 @@ struct PriceUpdate {
     address tokenOut;
     uint256 price;      // 1e18-scaled, tokenOut per tokenIn
     uint256 nonce;      // monotonic per (mm, tokenIn, tokenOut)
-    uint256 expiresAt;  // unix milliseconds, your wall-time validity cap
+    uint256 expiresAt;  // unix seconds, your wall-time validity cap
 }
 ```
 
