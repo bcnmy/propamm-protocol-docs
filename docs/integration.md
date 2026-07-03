@@ -190,6 +190,82 @@ Notes:
 - `chainId` selects the EIP-712 domain the signature is verified against. One connection can carry updates for multiple chains.
 - One signer per connection: every update's `mm` must match the subscribed `mm`. Run one connection per signing key.
 - Updates are rejected before the subscribe handshake completes (`NOT_SUBSCRIBED`).
+- Signatures are standard EIP-712: any `signTypedData` implementation works (viem, ethers). No custom hashing.
+- Unix milliseconds make a good nonce: monotonic, and independent nonce spaces per pair-direction mean the same value can be reused across pairs in one tick.
+- The server sends protocol-level WebSocket pings. Standard libraries answer them automatically; if you hand-roll a client, respond or the idle reaper drops you.
+
+### Minimal client
+
+A complete streaming client, verified against the live staging API. One pair, one direction; extend the loop for more.
+
+```ts
+import WebSocket from "ws";
+import { privateKeyToAccount } from "viem/accounts";
+
+const ENDPOINT = "wss://propamm-staging.biconomy.io";
+const CHAIN_ID = 84532;
+const EXECUTOR = "0xaBFb38a1FAd840531a85Bbfbe846BdBdb3B87801"; // per-chain, see table above
+const WETH = "0xD610F4f60eaF8cacfE2d5782419E7F3235F07c8C";
+const USDC = "0x1DFE288b8f39CFc80031aFE7619849B6289eA2AF";
+
+const account = privateKeyToAccount(process.env.MM_SIGNER_KEY as `0x${string}`);
+
+const TYPES = {
+  PriceUpdate: [
+    { name: "mm", type: "address" },
+    { name: "tokenIn", type: "address" },
+    { name: "tokenOut", type: "address" },
+    { name: "price", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "expiresAt", type: "uint256" },
+  ],
+} as const;
+
+const ws = new WebSocket(ENDPOINT);
+ws.on("open", () =>
+  ws.send(JSON.stringify({ type: "subscribe", data: { type: "price-ledger", mm: account.address } })),
+);
+ws.on("message", (m) => console.log(m.toString()));
+
+setInterval(async () => {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const price = 1700n * 10n ** 18n; // your pricing goes here (both tokens 18 decimals)
+  const nonce = BigInt(Date.now());
+  const expiresAt = nonce / 1000n + 30n;
+  const signature = await account.signTypedData({
+    domain: { name: "PropAMMExecutor", version: "1", chainId: BigInt(CHAIN_ID), verifyingContract: EXECUTOR },
+    types: TYPES,
+    primaryType: "PriceUpdate",
+    message: { mm: account.address, tokenIn: WETH, tokenOut: USDC, price, nonce, expiresAt },
+  });
+  ws.send(JSON.stringify({
+    type: "price-ledger-update",
+    payload: {
+      mm: account.address, tokenIn: WETH, tokenOut: USDC,
+      price: price.toString(), nonce: nonce.toString(), expiresAt: expiresAt.toString(),
+      signature, chainId: CHAIN_ID,
+    },
+  }));
+}, 1000);
+```
+
+### Error codes
+
+Every rejected update gets an `error` frame. The full set:
+
+| Code | Meaning | Fix |
+|---|---|---|
+| `NOT_SUBSCRIBED` | update sent before the subscribe ack | subscribe first, wait for `ack` |
+| `MARKET_MAKER_MISMATCH` | payload `mm` differs from the subscribed `mm` | one signer per connection |
+| `UNREGISTERED_MARKET_MAKER` | signer not registered with the orchestrator | complete onboarding step 3 |
+| `UNSUPPORTED_PAIR` | pair not registered for your MM on that chain | register the pair, check addresses and chainId |
+| `INVALID_SIGNATURE` | recovered signer does not match `mm` | check domain values, especially executor address and chainId |
+| `UPDATE_EXPIRED` | `expiresAt` already in the past | clock skew or TTL too short |
+| `STALE_NONCE` | nonce at or below the last accepted one for this pair-direction | keep nonces monotonic; unix ms works |
+| `RATE_LIMITED` | over 300 messages/s on the connection | back off |
+| `INVALID_JSON` / `INVALID_MESSAGE` | malformed frame or schema mismatch | check encoding rules above |
+| `INVALID_TOKEN_PAIR` | `tokenIn` equals `tokenOut` | fix the pair |
+| `STORE_FAILED` | transient server-side failure | safe to continue; the next update supersedes |
 
 ### Limits and hygiene
 
