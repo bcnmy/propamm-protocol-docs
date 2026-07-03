@@ -70,11 +70,12 @@ function executeSwap(
 
 ### Onboarding
 
-1. Deploy your provider with `(signer, executor, owner)`. `executor` is the `PropAMMExecutor` address; the constructor sets it as your `approvedExecutor`.
+1. Deploy your provider with `(signer, executor, owner)`. `executor` is the `PropAMMExecutor` address for the chain (addresses in section 3); the constructor sets it as your `approvedExecutor`.
 2. Fund the contract with `tokenOut` inventory for every pair you quote.
-3. Start streaming signed prices (next section).
+3. Share three things with the Biconomy team: your signer address, your provider contract address, and the token pairs you quote per chain. The orchestrator only accepts price updates from registered signers and only routes fills over registered pairs, so this step gates everything.
+4. Start streaming signed prices (next section).
 
-There is no on-chain registration step.
+There is no on-chain registration step. Registration is orchestrator-side only, per the list you share in step 3.
 
 ### Key rotation
 
@@ -92,11 +93,21 @@ struct PriceUpdate {
     address mm;         // your signer; must match provider.signer()
     address tokenIn;
     address tokenOut;
-    uint256 price;      // 1e18-scaled, tokenOut per tokenIn
+    uint256 price;      // 1e18-scaled, tokenOut-wei per tokenIn-wei (see below)
     uint256 nonce;      // monotonic per (mm, tokenIn, tokenOut)
     uint256 expiresAt;  // unix seconds, your wall-time validity cap
 }
 ```
+
+### Price is in raw token units
+
+`price` converts raw amounts: `amountOut = amountIn * price / 1e18`, both sides in wei. When the two tokens have different decimals, fold the difference into the price:
+
+```
+price = humanPrice * 1e18 * 10^(decimalsOut - decimalsIn)
+```
+
+Example, WETH (18 decimals) to USDC (6 decimals) at 1,700 USDC per WETH: `price = 1700 * 1e18 * 10^(6-18) = 1700e6`. The inverse direction, USDC to WETH, is `(1/1700) * 1e18 * 10^(18-6) ≈ 5.88e26`. Same-decimals pairs reduce to the intuitive `humanPrice * 1e18`.
 
 Signed against the `PropAMMExecutor` EIP-712 domain:
 
@@ -123,7 +134,89 @@ Your price commits to the chain inside the same transaction that settles the use
 
 ---
 
-## 3. One fill
+## 3. Connect to the live API
+
+A staging environment is live for integration on both chains:
+
+| | |
+|---|---|
+| REST | `https://propamm-staging.biconomy.io/v1` |
+| WebSocket | `wss://propamm-staging.biconomy.io` (same host, any path) |
+| Chains | Base Sepolia (84532, test tokens) and Base mainnet (8453) |
+
+`PropAMMExecutor` addresses for the EIP-712 domain:
+
+| Chain | Executor |
+|---|---|
+| Base Sepolia (84532) | `0xaBFb38a1FAd840531a85Bbfbe846BdBdb3B87801` |
+| Base mainnet (8453) | `0x9726D555b28223f2F69d5086BEde1e21567a77c3` |
+
+For Base Sepolia testing, the registered test tokens are mintable by anyone: MockWETH `0xD610F4f60eaF8cacfE2d5782419E7F3235F07c8C`, MockUSDC `0x1DFE288b8f39CFc80031aFE7619849B6289eA2AF` (both 18 decimals, `mint(address,uint256)`).
+
+### Wire protocol
+
+Messages are JSON text frames. `uint256` values are decimal strings. `signature` is the 65-byte `r || s || v` hex string.
+
+Open a connection, subscribe once for your signer, then stream:
+
+```jsonc
+// 1. you -> server, once per connection
+{ "type": "subscribe", "data": { "type": "price-ledger", "mm": "0xYourSigner" } }
+// server -> you
+{ "type": "ack" }
+
+// 2. you -> server, per price update
+{
+  "type": "price-ledger-update",
+  "payload": {
+    "mm": "0xYourSigner",
+    "tokenIn": "0x...",
+    "tokenOut": "0x...",
+    "price": "1700000000",
+    "nonce": "1783005487346",
+    "expiresAt": "1783005517",
+    "signature": "0x...",
+    "chainId": 8453
+  }
+}
+// server -> you, per update
+{ "type": "ack" }
+// or on rejection
+{ "type": "error", "code": "...", "message": "..." }
+```
+
+Notes:
+
+- `chainId` selects the EIP-712 domain the signature is verified against. One connection can carry updates for multiple chains.
+- One signer per connection: every update's `mm` must match the subscribed `mm`. Run one connection per signing key.
+- Updates are rejected before the subscribe handshake completes (`NOT_SUBSCRIBED`).
+
+### Limits and hygiene
+
+| Item | Value |
+|---|---|
+| Rate limit | 300 messages/s per connection |
+| Max message size | 64 KB |
+| Idle timeout | connections without traffic for 60 s are closed; reconnect and re-subscribe |
+| Suggested cadence | 100 to 1000 ms per pair-direction |
+| Suggested `expiresAt` | now + 15 to 60 s; expired updates are rejected |
+
+### Verify your integration
+
+Your stream is live when the quote endpoint prices against it:
+
+```
+GET /v1/health                  -> chains and status
+GET /v1/market-makers           -> your signer should be listed after registration
+GET /v1/quote?chainId=...&tokenIn=...&tokenOut=...&amountIn=...&trader=...
+                                -> amountOut derived from your latest update
+```
+
+A quote returning `No routes found` means no fresh anchor for that pair-direction: not registered, not streaming, or expired updates.
+
+---
+
+## 4. One fill
 
 ```mermaid
 sequenceDiagram
