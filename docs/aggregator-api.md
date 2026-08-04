@@ -133,8 +133,8 @@ Identical addresses on Base mainnet (8453) and Base Sepolia (84532):
 
 | Contract | Address |
 |---|---|
-| PropAMMSettlement (you call this) | `0x0000000030AD6bFE5f66fC7c05FA849e3A5FAEd3` |
-| PropAMMExecutor (fills route through it) | `0x000000004D941fc97c6d29d466FdF8Fd93Ab20a6` |
+| PropAMMSettlement (you call this) | `0x0000000001076e5E8b1a76A69cEF69104Ca8102C` |
+| PropAMMExecutor (fills route through it) | `0x0000000033e9C7EC69F3630e36978C58a7165660` |
 
 The call list we return targets settlement. You never need to encode it yourself, but for reference the
 entrypoint is:
