@@ -98,6 +98,7 @@ struct Level {
 
 struct PriceLadder {
     address mm;         // your signer; must match provider.signer()
+    address provider;   // your inventory contract; the only one that may fill this ladder
     address tokenIn;
     address tokenOut;
     Level[] levels;     // ascending sizes, prices monotone non-improving with depth, max 20
@@ -105,6 +106,11 @@ struct PriceLadder {
     uint256 expiresAt;  // unix seconds, your wall-time validity cap
 }
 ```
+
+`provider` is your inventory contract, and it is part of what you sign. A fill can only route
+through the contract you name here: the executor reads it off the signed ladder rather than taking
+it from whoever submits the fill, so nobody can point a fill at a contract of their own and consume
+your committed depth without paying for it.
 
 How levels are consumed: `size` is cumulative depth, so a ladder of `[(1e18, pA), (5e18, pB)]` means the first 1 tokenIn fills at `pA` and the next 4 at `pB`. The executor tracks how much has filled against your ladder in the block and sweeps each fill across your levels from that cursor - an order overlapping levels blends across them, each consumed slice at its tranche's price (your provider receives the exact volume-weighted average); total volume can never exceed your top level's size, and your tight level can never be re-armed within a block. This is the size-aware pricing a single number cannot express: be tight where you want, wide where you need.
 
@@ -235,6 +241,7 @@ import { privateKeyToAccount } from "viem/accounts";
 const ENDPOINT = "wss://propamm-staging.biconomy.io";
 const CHAIN_ID = 84532;
 const EXECUTOR = "0x000000004D941fc97c6d29d466FdF8Fd93Ab20a6"; // identical on both chains
+const PROVIDER = "0xYourProviderContract"; // your deployment from section 1
 const WETH = "0x8b414aD7005EeFd315aF2A16538885Eae229bab7";
 const USDC = "0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df";
 
@@ -243,6 +250,7 @@ const account = privateKeyToAccount(process.env.MM_SIGNER_KEY as `0x${string}`);
 const TYPES = {
   PriceLadder: [
     { name: "mm", type: "address" },
+    { name: "provider", type: "address" },
     { name: "tokenIn", type: "address" },
     { name: "tokenOut", type: "address" },
     { name: "levels", type: "Level[]" },
@@ -274,12 +282,12 @@ setInterval(async () => {
     domain: { name: "PropAMMExecutor", version: "1", chainId: BigInt(CHAIN_ID), verifyingContract: EXECUTOR },
     types: TYPES,
     primaryType: "PriceLadder",
-    message: { mm: account.address, tokenIn: WETH, tokenOut: USDC, levels, nonce, expiresAt },
+    message: { mm: account.address, provider: PROVIDER, tokenIn: WETH, tokenOut: USDC, levels, nonce, expiresAt },
   });
   ws.send(JSON.stringify({
     type: "price-ladder",
     payload: {
-      mm: account.address, tokenIn: WETH, tokenOut: USDC,
+      mm: account.address, provider: PROVIDER, tokenIn: WETH, tokenOut: USDC,
       levels: levels.map((l) => ({ size: l.size.toString(), price: l.price.toString() })),
       nonce: nonce.toString(), expiresAt: expiresAt.toString(),
       signature, chainId: CHAIN_ID,
