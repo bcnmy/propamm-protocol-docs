@@ -165,8 +165,8 @@ A staging environment is live for integration on both chains:
 
 | Chain | PropAMMExecutor (sign against this, set as your approvedExecutor) |
 |---|---|
-| Base Sepolia (84532) | `0x0000000033e9C7EC69F3630e36978C58a7165660` |
-| Base mainnet (8453) | `0x0000000033e9C7EC69F3630e36978C58a7165660` |
+| Base Sepolia (84532) | `0x000000002aD9cBA9586aA1AdB5E0Efa28B3f699d` |
+| Base mainnet (8453) | `0x000000002aD9cBA9586aA1AdB5E0Efa28B3f699d` |
 
 Both chains are open for integration today:
 
@@ -184,7 +184,7 @@ Token addresses per chain:
 
 Sepolia test tokens are mintable by anyone via `mint(address,uint256)`.
 
-For reference only, since as a maker you need nothing but the executor above: PropAMMSettlement (the entrypoint aggregators call) `0x0000000001076e5E8b1a76A69cEF69104Ca8102C`, Create2InitFactory `0x6102d4c1fEF0006Fc38E04d77a588888022aD9E1`.
+For reference only, since as a maker you need nothing but the executor above: PropAMMSettlement (the entrypoint aggregators call) `0x000000007B35397ACD539Ec98A73F97c4f9C57aB`, Create2InitFactory `0x6102d4c1fEF0006Fc38E04d77a588888022aD9E1`.
 
 ### Wire protocol
 
@@ -240,7 +240,7 @@ import { privateKeyToAccount } from "viem/accounts";
 
 const ENDPOINT = "wss://propamm-staging.biconomy.io";
 const CHAIN_ID = 84532;
-const EXECUTOR = "0x0000000033e9C7EC69F3630e36978C58a7165660"; // identical on both chains
+const EXECUTOR = "0x000000002aD9cBA9586aA1AdB5E0Efa28B3f699d"; // identical on both chains
 const PROVIDER = "0xYourProviderContract"; // your deployment from section 1
 const WETH = "0x8b414aD7005EeFd315aF2A16538885Eae229bab7";
 const USDC = "0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df";
