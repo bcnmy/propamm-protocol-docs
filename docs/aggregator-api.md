@@ -12,9 +12,9 @@
 
 | | |
 |---|---|
-| Base URL | `https://propamm-staging.biconomy.io/v1` |
+| Base URL | `https://propamm.biconomy.io/v1` (production) |
 | Chains | Base mainnet (8453), Base Sepolia (84532, test tokens) |
-| Auth | None on staging; keys issued at production onboarding |
+| Auth | `x-api-key` header on every endpoint except `/health`; keys and per-key rate limits issued at onboarding |
 
 ```
 GET  /v1/health                -> chains and node status
@@ -59,7 +59,10 @@ Only the second response goes onchain. Responses are stateless and free; there i
 Rules:
 
 - Execute `calls` in order, all inside one transaction.
-- **Deliver the input to settlement first.** The call list assumes `amountIn` of `tokenIn` is already at the settlement contract when the swap call runs, so transfer it in the same transaction, immediately before. This matches the venue-adapter convention where input tokens are transferred to the venue before it is called. If your router works differently, talk to us.
+- **Deliver the input to settlement first.** The call list assumes `amountIn` of `tokenIn` is already at the settlement contract when the swap call runs. Two conventions, both supported, nothing to declare:
+  - **Push (recommended):** transfer `amountIn` to settlement in the same transaction, immediately before the calls. Native ETH input instead arrives as `msg.value` on the swap call itself. This is the standard venue-adapter convention.
+  - **Pull:** approve settlement and prepend your own `transferFrom(you, settlement, amountIn)` step. Keep that approval exact-amount and same-transaction: never grant settlement a standing allowance from a fund-holding address, the same caveat every arbitrary-call executor carries.
+- **A `400 No routes found` is a decline, not an error.** Sizes below a maker's minimum, above available depth, or hitting a momentary maker gap return no quote rather than a degraded price. Route that trade elsewhere and come back.
 - `validUntil` is hard (typically tens of seconds out). Past or near it, refetch.
 - Never replay an old response. Prices are versioned onchain; a superseded call list reverts instead of filling at a stale price.
 - **We enforce a delivery floor onchain.** The call list carries `minAmountOut`, and settlement reverts unless `receiver`'s `tokenOut` balance grew by at least that much. You do not have to add your own min-received wrapper, though keeping one costs nothing.
@@ -176,11 +179,12 @@ event SwapExecuted(
 | Freshness | Enforced onchain; stale or superseded quotes cannot fill |
 | Partial fills | None |
 | Failure cost | Revert before any funds move; a failed fill costs only gas |
+| Declines | Unquotable sizes return `400 No routes found`, never a worse price |
 | Fees | None; the quoted price is the full economics |
 
 ## Testing
 
-Base Sepolia is live end to end with mintable test tokens: MockWETH `0x8b414aD7005EeFd315aF2A16538885Eae229bab7`, MockUSDC `0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df` (`mint(address,uint256)`, open). Base mainnet quoting is live against verified contracts.
+Base Sepolia is live end to end with mintable test tokens: MockWETH `0x8b414aD7005EeFd315aF2A16538885Eae229bab7`, MockUSDC `0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df` (`mint(address,uint256)`, open). Base mainnet is fully live: WETH/USDC and cbBTC/USDC, quoting and settling against verified contracts, with maker-side liquidity streaming continuously.
 
 Production onboarding (API keys, pairs, inventory scope): reach out and we will scope it together.
 
