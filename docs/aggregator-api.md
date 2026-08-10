@@ -81,6 +81,27 @@ calling a quote API in the routing hot path:
 GET /v1/levels?chainId=8453&tokenIn=0x..&tokenOut=0x..
 ```
 
+To fetch the whole chain in one request, omit the pair. The response carries every direction
+the chain quotes, each entry with its own `tokenIn`, `tokenOut`, `merged` and `makers` in the
+same shapes documented below:
+
+```
+GET /v1/levels?chainId=8453
+```
+
+```jsonc
+{
+  "chainId": 8453,
+  "pairs": [
+    { "tokenIn": "0x..", "tokenOut": "0x..", "merged": [ ... ], "makers": [ ... ] }
+  ],
+  "asOf": 1784889564
+}
+```
+
+One poll per chain replaces one poll per direction; both forms serve the same data with the
+same freshness.
+
 ```jsonc
 {
   "chainId": 8453,
