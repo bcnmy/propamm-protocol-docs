@@ -149,16 +149,57 @@ it only matters for small trades. `/v1/firm-quote` handles this for you.
 
 ## Adding your fee
 
-You hold the flow, so take your fee yourself: point `receiver` at your own contract, keep your cut, forward the rest. The full `amountOut` is delivered to whichever `receiver` you pass, so nothing needs coordinating with us and there is nothing to reconcile.
+Two ways, both supported. Pick either.
+
+**1. Take it yourself (nothing to coordinate).** You hold the flow: point `receiver` at your own contract, keep your cut, forward the rest. The full `amountOut` is delivered to whichever `receiver` you pass, so there is nothing to reconcile with us.
+
+**2. Let settlement collect it for you (AlphaFee-style).** If you would rather not run a splitter contract, we can take your fee inside the same swap and pay it to your fee wallet atomically. Add two parameters:
+
+| Param | Meaning |
+|---|---|
+| `feeAmount` | your fee as an absolute amount in **`tokenOut` units** (KyberSwap: `alpha_fee_amount`) |
+| `taker` | the address that will submit the transaction - your executor / `rfq_sender`. Required alongside `feeAmount`, must be non-zero, and must be the `msg.sender` that executes |
+
+```
+GET /v1/firm-quote?chainId=8453&tokenIn=0x..&tokenOut=0x..
+    &amountIn=100000000000000000&receiver=0xUser
+    &feeAmount=100000&taker=0xYourExecutor
+```
+
+Every amount in the response is **net of your fee**, and a `fee` object is added:
+
+```jsonc
+{
+  "amountOut": "189716044",      // NET - what receiver actually gets
+  "minAmountOut": "187818883",   // delivery floor, enforced onchain on the NET
+  "fee": {
+    "amount": "100000",          // your fee, in tokenOut units
+    "salt": "0xabd2..9fd4",      // reconciliation key, see below
+    "taker": "0x.."
+  },
+  "calls": [ { "to": "0x<settlement>", "value": "0", "data": "0x.." } ]
+}
+```
+
+What differs at execution:
+
+- The call list targets `swapWithFee` rather than `swap`.
+- **Input is PULLED from `taker`,** so use the pull convention here: approve `amountIn` of `tokenIn` to settlement (exact-amount, same transaction) instead of pushing it. This matches the `rfq_sender` model.
+- The route leaves the gross output at settlement, which pays your `feeAmount` to your fee wallet and the remainder to `receiver`, atomically. The delivery floor applies to the net, so your user is never delivered below the quoted floor.
+- The fee terms are signed by us (EIP-712, single-use) and cannot be edited out of the calldata; a route that would not leave the fee at settlement reverts instead. Execute our calldata as returned.
+
+Reconciliation is an onchain fact rather than a trust exercise: each fill emits `AggregatorFeeCharged(token, feeReceiver, fee, salt)`, and the `salt` from your quote response is the join key between issued quotes and collected fees. Volume still reports via `SwapExecuted` on the gross `amountIn`; the fee is a separate event and is not double counted.
+
+One fee wallet is configured per integrator, so fees never mix between partners. `feeAmount` is absolute rather than bps because you decide the rate and the rounding. Ask us to enable it for your key; feeless integrators simply omit both parameters.
 
 ## Contracts
 
-Identical addresses on Base mainnet (8453) and Base Sepolia (84532):
+Identical addresses on Base mainnet (8453), BNB Smart Chain (56) and Base Sepolia (84532):
 
 | Contract | Address |
 |---|---|
-| PropAMMSettlement (you call this) | `0x000000007B35397ACD539Ec98A73F97c4f9C57aB` |
-| PropAMMExecutor (fills route through it) | `0x000000002aD9cBA9586aA1AdB5E0Efa28B3f699d` |
+| PropAMMSettlement (you call this) | `0x0000006192062A976eD45E6A33955504C221AB56` |
+| PropAMMExecutor (fills route through it) | `0x000000D4F7Baa7d6432D63BA98b052B0FdF11DEa` |
 
 The call list we return targets settlement. You never need to encode it yourself, but for reference the
 entrypoint is:
@@ -176,6 +217,25 @@ struct Step { address to; uint256 value; bytes data; bool isDelegatecall; }
 
 function swap(SwapParams calldata p, Step[] calldata steps)
     external payable returns (uint256 delivered);
+
+// Used when you pass feeAmount + taker. Same route, plus fee terms we sign:
+// settlement takes auth.feeAmount of tokenOut to your fee wallet and delivers the
+// remainder to p.receiver, with p.minAmountOut enforced on that remainder.
+struct FeeAuth {
+    address tokenOut;      // must equal p.tokenOut
+    uint256 feeAmount;     // absolute, in tokenOut units
+    address feeReceiver;   // your fee wallet
+    uint256 expiry;
+    address taker;         // required, must equal msg.sender
+    bytes32 salt;          // single-use; the reconciliation key
+}
+
+function swapWithFee(
+    SwapParams calldata p,
+    Step[] calldata steps,
+    FeeAuth calldata auth,
+    bytes calldata quoteSig
+) external payable returns (uint256 delivered);
 ```
 
 Volume is observable from one event, indexed on caller and pair:
@@ -192,6 +252,18 @@ event SwapExecuted(
 );
 ```
 
+If you use the collected-fee option, each fill also emits the fee itself, joinable to your quote
+by `salt`:
+
+```solidity
+event AggregatorFeeCharged(
+    address indexed token,
+    address indexed feeReceiver,
+    uint256 fee,
+    bytes32 salt
+);
+```
+
 ## Behavior
 
 | Property | Behavior |
@@ -201,7 +273,7 @@ event SwapExecuted(
 | Partial fills | None |
 | Failure cost | Revert before any funds move; a failed fill costs only gas |
 | Declines | Unquotable sizes return `400 No routes found`, never a worse price |
-| Fees | None; the quoted price is the full economics |
+| Fees | None of ours; the quoted price is the full economics. Optionally, YOUR fee collected inside the swap (`feeAmount` + `taker`) and paid to your fee wallet |
 
 ## Testing
 

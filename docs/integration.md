@@ -159,21 +159,22 @@ A staging environment is live for integration on both chains:
 |---|---|
 | REST | `https://propamm-staging.biconomy.io/v1` |
 | WebSocket | `wss://propamm-staging.biconomy.io` (same host, any path) |
-| Chains | Base Sepolia (84532, test tokens) and Base mainnet (8453) |
+| Chains | Base Sepolia (84532, test tokens), Base mainnet (8453), BNB Smart Chain (56) |
 
-`PropAMMExecutor` is the one address that matters to you: your ladders are signed against it (the EIP-712 `verifyingContract`) and it is the only address your provider trusts as `approvedExecutor`. It is identical on both chains:
+`PropAMMExecutor` is the one address that matters to you: your ladders are signed against it (the EIP-712 `verifyingContract`) and it is the only address your provider trusts as `approvedExecutor`. It is identical on every chain:
 
 | Chain | PropAMMExecutor (sign against this, set as your approvedExecutor) |
 |---|---|
-| Base Sepolia (84532) | `0x000000002aD9cBA9586aA1AdB5E0Efa28B3f699d` |
-| Base mainnet (8453) | `0x000000002aD9cBA9586aA1AdB5E0Efa28B3f699d` |
+| Base Sepolia (84532) | `0x000000D4F7Baa7d6432D63BA98b052B0FdF11DEa` |
+| Base mainnet (8453) | `0x000000D4F7Baa7d6432D63BA98b052B0FdF11DEa` |
+| BNB Smart Chain (56) | `0x000000D4F7Baa7d6432D63BA98b052B0FdF11DEa` |
 
-Both chains are open for integration today:
+All chains are open for integration today:
 
 - **Base Sepolia (84532)** is fully live and serving end to end. Mint test tokens, stream ladders, and watch fills settle. This is the place to build and validate.
-- **Base mainnet (8453)** contracts are deployed and source-verified at the identical addresses. Mainnet onboarding is currently **capped and pre-audit**: start with small inventory and tight per-block top-level sizes. The external audit is scheduled before unrestricted scaling, which is exactly why the first makers start capped.
+- **Base mainnet (8453)** and **BNB Smart Chain (56)** contracts are deployed and source-verified at the identical addresses. Mainnet onboarding is currently **capped and pre-audit**: start with small inventory and tight per-block top-level sizes. The external audit is scheduled before unrestricted scaling, which is exactly why the first makers start capped.
 
-Because the executor address and EIP-712 domain are identical on both chains, your signing setup carries over from Sepolia to mainnet with no change. The one thing to recompute is the raw price value: mainnet USDC has **6 decimals** versus the Sepolia test token's 18, so the `price` number differs per the raw-token-units rule in section 2.
+Because the executor address and EIP-712 domain are identical on every chain, your signing setup carries over from Sepolia to mainnet with no change. The one thing to recompute is the raw price value: mainnet USDC has **6 decimals** versus the Sepolia test token's 18, so the `price` number differs per the raw-token-units rule in section 2.
 
 Token addresses per chain:
 
@@ -184,7 +185,7 @@ Token addresses per chain:
 
 Sepolia test tokens are mintable by anyone via `mint(address,uint256)`.
 
-For reference only, since as a maker you need nothing but the executor above: PropAMMSettlement (the entrypoint aggregators call) `0x000000007B35397ACD539Ec98A73F97c4f9C57aB`, Create2InitFactory `0x6102d4c1fEF0006Fc38E04d77a588888022aD9E1`.
+For reference only, since as a maker you need nothing but the executor above: PropAMMSettlement (the entrypoint aggregators call) `0x0000006192062A976eD45E6A33955504C221AB56`, Create2InitFactory `0x8f25c3b327Ce7F29ACB0183285586234BC7086a4`.
 
 ### Wire protocol
 
@@ -240,7 +241,7 @@ import { privateKeyToAccount } from "viem/accounts";
 
 const ENDPOINT = "wss://propamm-staging.biconomy.io";
 const CHAIN_ID = 84532;
-const EXECUTOR = "0x000000002aD9cBA9586aA1AdB5E0Efa28B3f699d"; // identical on both chains
+const EXECUTOR = "0x000000D4F7Baa7d6432D63BA98b052B0FdF11DEa"; // identical on every chain
 const PROVIDER = "0xYourProviderContract"; // your deployment from section 1
 const WETH = "0x8b414aD7005EeFd315aF2A16538885Eae229bab7";
 const USDC = "0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df";
