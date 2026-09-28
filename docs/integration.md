@@ -47,9 +47,10 @@ interface IMMProvider {
 }
 ```
 
-Two ways to have one:
+Three ways to have one:
 
 - **Off the shelf.** [`examples/BasicMMProvider.sol`](examples/BasicMMProvider.sol), with [`examples/IMMProvider.sol`](examples/IMMProvider.sol), is the reference implementation: inventory holder, executor gate, owner-controlled signer and executor rotation, owner-only withdrawals, no price logic. Both files are byte-for-byte copies of the contracts repository; the import in `BasicMMProvider.sol` assumes the layout `src/interfaces/IMMProvider.sol` and `src/periphery/examples/BasicMMProvider.sol`, and the contract depends on [solady](https://github.com/Vectorized/solady). Deploy it with `(signer, executor, owner)`, fund it, done. You write no Solidity.
+- **The vault you already run.** If your inventory sits in a vault that trusts one router through an ERC-20 allowance, deploy [`examples/RouterVaultProvider.sol`](examples/RouterVaultProvider.sol) with `(vault, signer, executor, owner)`, then from the vault's admin point its router at it and set an allowance per token. The vault keeps the inventory and needs no code change: each fill takes your output from the vault to the receiver and sends the taker's input into the vault, and the allowance is your hard cap. Same layout as above, at `src/periphery/providers/RouterVaultProvider.sol`.
 - **Your own contract.** If your inventory already lives onchain (a pool, a vault, a position), implement the three functions on your existing contract instead. Your funds never move to a new address.
 
 ### What `executeSwap` does
