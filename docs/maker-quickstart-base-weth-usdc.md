@@ -8,17 +8,17 @@ You need Foundry (`forge`, `cast`), Node 20 or later, a Base Sepolia RPC URL, a 
 
 | What | Address |
 |---|---|
-| `PropAMMExecutor` (sign against this; set it as `approvedExecutor`) | `0x000000fFA5f8Ae192Ab65204f9B7E062CbF4e05D` |
-| `PropAMMVenue` (routers read and fill your board here) | `0x00000035a8a58f704ab0D567D6c67A486428E35a` |
+| `PropAMMExecutor` (sign against this; set it as `approvedExecutor`) | `0x000000Bb60AAE6f25cBD9Fc63BB677AB5b8C23dC` |
+| `PropAMMVenue` (routers read and fill your board here) | `0x0000008792fE035f85b03593e10cF8ee59e69Fa2` |
 | MockWETH (18 decimals, mintable) | `0x8b414aD7005EeFd315aF2A16538885Eae229bab7` |
 | MockUSDC (18 decimals, mintable) | `0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df` |
 
-On Base (8453) and BNB Smart Chain (56) the executor is `0x000000e5Ba94f47C0Fd723F56f1678a841fd33c9` and the venue is `0x000000c3380954F805699A363a25AB374ceEb792`. The executor is the EIP-712 `verifyingContract`, so set it per chain.
+Base (8453) and BNB Smart Chain (56) use the same executor and venue addresses. The executor is the EIP-712 `verifyingContract`; between chains only `chainId` changes.
 
 ```bash
 export RPC_URL=<your Base Sepolia RPC>
-export EXECUTOR=0x000000fFA5f8Ae192Ab65204f9B7E062CbF4e05D
-export VENUE=0x00000035a8a58f704ab0D567D6c67A486428E35a
+export EXECUTOR=0x000000Bb60AAE6f25cBD9Fc63BB677AB5b8C23dC
+export VENUE=0x0000008792fE035f85b03593e10cF8ee59e69Fa2
 export WETH=0x8b414aD7005EeFd315aF2A16538885Eae229bab7
 export USDC=0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df
 export SIGNER=<address of your signing key>
@@ -50,11 +50,11 @@ cast send $WETH "mint(address,uint256)" $PROVIDER 1000000000000000000000    --rp
 
 ## Step 3: register
 
-Send the network your signer address, your provider address and the directions you will quote (here WETH to USDC and USDC to WETH on 84532). The stream rejects messages until this is done (`UNREGISTERED_MARKET_MAKER`, `UNSUPPORTED_PAIR`, `PROVIDER_MISMATCH`). For the onchain lane the venue owner also registers your signer on the venue; nothing on your side.
+Send the network your signer address, your provider address and the directions you will quote (here WETH to USDC and USDC to WETH on 84532). The stream rejects messages until this is done (`UNREGISTERED_MARKET_MAKER`, `UNSUPPORTED_PAIR`, `PROVIDER_MISMATCH`). The stream also needs an API key from the network. For the onchain lane the venue owner also registers your signer on the venue; nothing on your side.
 
 ## Step 4: connect and stream
 
-Connect to `wss://propamm-staging.biconomy.io`, subscribe as your signer, and send boards. Pick one of the two forms.
+Connect to `wss://propamm-staging.biconomy.io/v1/ws` with your API key in the `x-api-key` header, subscribe as your signer, and send boards. Pick one of the two forms.
 
 **A price ladder.** Sign a `PriceLadder` per direction on every tick: cumulative sizes, absolute prices, a strictly increasing nonce, a TTL of tens of seconds. With both mock tokens at 18 decimals, 2,000 USDC per WETH is `price = 2000e18` for WETH to USDC and `5e14` for USDC to WETH (`1e18 / 2000`).
 
@@ -78,7 +78,7 @@ Connect to `wss://propamm-staging.biconomy.io`, subscribe as your signer, and se
 }
 ```
 
-**An anchor loop.** Sign one `OffsetLadder` per direction (sizes, offsets in ppm below the anchor, optional drift, a TTL of up to an hour), then an `Anchor` per direction every second with the reference price, its own nonce and a TTL of about 15 seconds. The runnable client in [integration.md, section 4](integration.md#4-the-stream) does exactly this against the addresses above; set `MM_SIGNER_KEY` and `PROVIDER` and run it.
+**An anchor loop.** Sign one `OffsetLadder` per direction (sizes, offsets in ppm below the anchor, optional drift, a TTL of up to an hour), then every second one `AnchorBatch` with an entry for the pair: the reference price for one direction (the reverse prices at `1e36 / price`), a `timestampMs` and a `ttl` of about 15 seconds. The runnable client in [integration.md, section 4](integration.md#4-the-stream) does exactly this against the addresses above; set `MM_SIGNER_KEY` and `PROVIDER` and run it.
 
 Every accepted message is answered with `{ "type": "ack" }`. An `error` frame names the reason; the code table is in [integration.md](integration.md#error-codes).
 
@@ -122,7 +122,7 @@ cast call $VENUE "board(address,address,address)(uint256[],uint256[],uint256,uin
   $SIGNER $WETH $USDC --rpc-url $RPC_URL
 ```
 
-The executor returns the same plus both nonces and the form (`1` price ladder, `2` offset ladder):
+The executor returns the same plus the depth nonce, the anchor `timestampMs` (`anchorNonce`) and the form (`1` price ladder, `2` offset ladder):
 
 ```bash
 cast call $EXECUTOR "board(address,address,address)(uint256[],uint256[],uint256,uint256,uint256,uint256,uint256,uint8)" \
@@ -139,7 +139,7 @@ cast call $VENUE "levels(address,address)(uint256[],uint256[],uint256)" $WETH $U
 
 `remaining` is the smaller of the depth left in the version and what the current block has left under your `blockCap`, so with the controls above it reads at most 5e18 even on a fresh board.
 
-If `board()` returns empty arrays and `remaining == 0`, the board is dark: not yet committed, expired, or (offset form) missing a live anchor. Check that your messages are acked, that `expiresAt` leaves enough life for the commit to land, and on an offset board that anchors keep flowing.
+If `board()` returns empty arrays and `remaining == 0`, the board is dark: not yet committed, expired, or (offset form) missing a live anchor for the pair. Check that your messages are acked, that `expiresAt` leaves enough life for the commit to land, and on an offset board that anchors keep flowing.
 
 ## Step 7: watch a fill
 

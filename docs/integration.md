@@ -89,12 +89,12 @@ Nothing onchain is required of you beyond the provider. The hosted lane routes t
 
 | Environment | WebSocket | Chains |
 |---|---|---|
-| Staging | `wss://propamm-staging.biconomy.io` | Base Sepolia (84532), mintable test tokens |
-| Production | `wss://propamm.biconomy.io` | Base (8453) and BNB Smart Chain (56) |
+| Staging | `wss://propamm-staging.biconomy.io/v1/ws` | Base Sepolia (84532), mintable test tokens |
+| Production | `wss://propamm.biconomy.io/v1/ws` | Base (8453) and BNB Smart Chain (56) |
 
 Same protocol and message shapes on both. A client validated against staging moves to production by changing the endpoint, `chainId` and the token addresses.
 
-Open a connection, subscribe once for your signer, then send `price-ladder`, `offsets`, `anchor` and `board-controls` messages as described in [price-ladder-streaming.md](price-ladder-streaming.md). Every accepted message is answered with `{ "type": "ack" }`, every rejected one with `{ "type": "error", "code", "message" }`.
+Open a connection with your API key in the `x-api-key` header (without a valid key the server refuses the connection with HTTP 401), subscribe once for your signer, then send `price-ladder`, `offsets`, `anchor` and `board-controls` messages as described in [price-ladder-streaming.md](price-ladder-streaming.md). Every accepted message is answered with `{ "type": "ack" }`, every rejected one with `{ "type": "error", "code", "message" }`.
 
 ### The ladder is your pricing curve
 
@@ -108,15 +108,15 @@ That has three consequences worth designing around.
 
 ### Minimal client
 
-An offset board: one offset ladder per direction at start, then an anchor per direction every second. Replace `yourPrice()` with your engine's reference price in raw units (see [prices in raw token units](price-ladder-streaming.md#prices-are-in-raw-token-units)).
+An offset board: one offset ladder for WETH to USDC at start, then every second one anchor message whose single entry prices both directions of the pair. To quote USDC to WETH as well, sign an offset ladder for that direction; the same anchor entry prices it. Replace `yourPrice()` with your engine's reference price in raw units (see [prices in raw token units](price-ladder-streaming.md#prices-are-in-raw-token-units)).
 
 ```ts
 import WebSocket from "ws";
 import { privateKeyToAccount } from "viem/accounts";
 
-const ENDPOINT = "wss://propamm-staging.biconomy.io";
+const ENDPOINT = "wss://propamm-staging.biconomy.io/v1/ws";
 const CHAIN_ID = 84532;
-const EXECUTOR = "0x000000e5Ba94f47C0Fd723F56f1678a841fd33c9"; // Base and BNB; use 0x000000fFA5f8Ae192Ab65204f9B7E062CbF4e05D on Base Sepolia
+const EXECUTOR = "0x000000Bb60AAE6f25cBD9Fc63BB677AB5b8C23dC"; // same address on every chain
 const PROVIDER = "0xYourProviderContract";
 const TOKEN_IN = "0x8b414aD7005EeFd315aF2A16538885Eae229bab7";  // MockWETH, 18 decimals
 const TOKEN_OUT = "0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df"; // MockUSDC, 18 decimals
@@ -131,12 +131,13 @@ const types = {
     { name: "rungs", type: "Rung[]" }, { name: "nonce", type: "uint256" },
     { name: "expiresAt", type: "uint256" }, { name: "driftPpmPerSecond", type: "uint256" },
   ],
-  Anchor: [
-    { name: "mm", type: "address" }, { name: "tokenIn", type: "address" },
-    { name: "tokenOut", type: "address" }, { name: "price", type: "uint256" },
-    { name: "nonce", type: "uint256" }, { name: "timestamp", type: "uint256" },
-    { name: "expiresAt", type: "uint256" },
+  AnchorEntry: [
+    { name: "tokenIn", type: "address" }, { name: "tokenOut", type: "address" },
+    { name: "price", type: "uint256" }, { name: "timestampMs", type: "uint256" },
+    { name: "ttl", type: "uint256" }, { name: "skewPpm", type: "uint256" },
+    { name: "reverseSkewPpm", type: "uint256" },
   ],
+  AnchorBatch: [{ name: "mm", type: "address" }, { name: "entries", type: "AnchorEntry[]" }],
 } as const;
 
 const now = () => BigInt(Math.floor(Date.now() / 1000));
@@ -162,30 +163,38 @@ async function sendOffsets(ws: WebSocket) {
   ws.send(frame({ type: "offsets", payload: { ...message, signature, chainId: CHAIN_ID } }));
 }
 
-async function sendAnchor(ws: WebSocket) {
-  const t = now();
-  const message = {
-    mm: account.address, tokenIn: TOKEN_IN, tokenOut: TOKEN_OUT,
-    price: yourPrice(),
-    nonce: BigInt(Date.now()),          // anchor nonce, independent of the depth nonce; fits uint48
-    timestamp: t,                       // when this price was produced; the drift origin
-    expiresAt: t + 15n,                 // dark 15 seconds after this tick if no fresher anchor lands
-  };
-  const signature = await account.signTypedData({ domain, types, primaryType: "Anchor", message });
+let lastTimestampMs = 0n;
+
+async function sendAnchors(ws: WebSocket) {
+  const t = BigInt(Date.now());
+  lastTimestampMs = t > lastTimestampMs ? t : lastTimestampMs + 1n; // strictly increasing per pair
+  const entries = [
+    {
+      tokenIn: TOKEN_IN, tokenOut: TOKEN_OUT,
+      price: yourPrice(),               // TOKEN_IN to TOKEN_OUT; the reverse prices at 1e36 / price
+      timestampMs: lastTimestampMs,     // when this price was produced; the drift origin and ordering key
+      ttl: 15n,                         // dark 15 seconds after timestampMs if no fresher anchor lands
+      skewPpm: 0n,                      // extra discount on TOKEN_IN to TOKEN_OUT
+      reverseSkewPpm: 0n,               // extra discount on TOKEN_OUT to TOKEN_IN
+    },
+    // one entry per further pair you quote, up to 32 per message
+  ];
+  const message = { mm: account.address, entries };
+  const signature = await account.signTypedData({ domain, types, primaryType: "AnchorBatch", message });
   ws.send(frame({ type: "anchor", payload: { ...message, signature, chainId: CHAIN_ID } }));
 }
 
-const ws = new WebSocket(ENDPOINT);
+const ws = new WebSocket(ENDPOINT, { headers: { "x-api-key": process.env.PROPAMM_API_KEY as string } });
 ws.on("message", (m) => console.log(m.toString()));
 ws.on("open", async () => {
   ws.send(JSON.stringify({ type: "subscribe", data: { type: "price-ledger", mm: account.address } }));
   await sendOffsets(ws);                                   // once, and again only when sizes, offsets or drift change
-  setInterval(() => void sendAnchor(ws), 1000);            // the price, every second
+  setInterval(() => void sendAnchors(ws), 1000);           // every pair's price, every second
 });
 ws.on("close", () => process.exit(1));                     // let a supervisor restart for a clean reconnect
 ```
 
-A price-ladder maker replaces the two senders with one that signs `PriceLadder` (`levels` of `{ size, price }`, `primaryType: "PriceLadder"`) on every tick and sends it as `type: "price-ladder"`. A runnable variant that samples a pricing curve into a ladder is in [`examples/curve-maker-reference.ts`](examples/curve-maker-reference.ts). Stream both directions of a pair if you want to serve both; each direction is its own board with its own nonces, meter and anchor.
+A price-ladder maker replaces the two senders with one that signs `PriceLadder` (`levels` of `{ size, price }`, `primaryType: "PriceLadder"`) on every tick and sends it as `type: "price-ladder"`. A runnable variant that samples a pricing curve into a ladder is in [`examples/curve-maker-reference.ts`](examples/curve-maker-reference.ts). Stream both directions of a pair if you want to serve both; each direction is its own board with its own depth nonce, meter and controls, and one anchor entry prices both.
 
 ### Risk controls
 
@@ -235,13 +244,13 @@ Full field semantics, validation rules and the wire frame are in [price-ladder-s
 | `MARKET_MAKER_MISMATCH` | payload `mm` differs from the subscribed `mm` | one signer per connection |
 | `RATE_LIMITED` | over 300 board messages per second on the connection | back off |
 | `UNSUPPORTED_CHAIN` | `chainId` not served by this environment | check the environment table |
-| `UPDATE_EXPIRED` | `expiresAt` already in the past | clock skew or TTL too short |
+| `UPDATE_EXPIRED` | `expiresAt`, or an anchor entry's `timestampMs / 1000 + ttl`, already in the past | clock skew or TTL too short |
 | `INVALID_TOKEN_PAIR` | `tokenIn` equals `tokenOut` | fix the pair |
 | `UNREGISTERED_MARKET_MAKER` | signer not registered | complete registration |
 | `INVALID_SIGNATURE` | recovered signer does not match `mm` | check the domain: version `2`, executor address, `chainId`, and the types object |
-| `UNSUPPORTED_PAIR` | pair or direction not registered for you on that chain | register it, check addresses and `chainId` |
+| `UNSUPPORTED_PAIR` | pair or direction not registered for you on that chain; for an anchor message, any entry whose pair is not registered in either direction refuses the whole message | register it, check addresses and `chainId` |
 | `PROVIDER_MISMATCH` | signed `provider` differs from the one registered for the pair | sign the registered provider or update the registration |
-| `STALE_NONCE` | nonce at or below the last accepted one for this board; the depth, anchor and controls sequences are counted separately | keep nonces strictly increasing; unix milliseconds work |
+| `STALE_NONCE` | nonce at or below the last accepted one for this board; the depth and controls sequences are counted separately; an anchor message is stale only when every entry is at or below its pair's last `timestampMs` | keep nonces and anchor timestamps strictly increasing; unix milliseconds work |
 | `STORE_FAILED` | transient server-side failure | safe to continue; the next message replaces it |
 
 ### Limits
@@ -252,7 +261,9 @@ Full field semantics, validation rules and the wire frame are in [price-ladder-s
 | Max frame size | 64 KB |
 | Inactivity | 60 seconds without inbound traffic closes the connection; the server pings every 10 seconds and standard libraries answer automatically |
 | Levels or rungs per message | 20 |
+| Entries per anchor message | 32, at most one per pair |
 | `expiresAt` | in the future, at most one hour ahead; board controls carry no expiry |
+| Anchor `ttl` | 1 to 3600 seconds |
 
 ### Verify
 
@@ -273,7 +284,7 @@ On the onchain lane the venue quotes from the board, not from `previewSwap`. A p
 - Inventory is `tokenOut` per direction. A WETH to USDC board pays from your USDC; the incoming WETH lands in your provider and funds the reverse direction if you quote it.
 - The top size of a depth version is your exposure cap for that version: across every route, lane and retry, one version never fills more than its top size, and the most `tokenOut` it can pay is the sum over its levels of `(size_i - size_{i-1}) * price_i / 1e18`. Keep at least that much in the provider, or `executeSwap` reverts and the fill fails (the trade reverts; nothing is lost).
 - Both lanes draw on one meter. A hosted fill and a venue fill of the same version consume the same depth.
-- On price ladders every commit re-opens the full top size. On offset boards depth re-opens only when you re-sign the offset ladder, so the top size is exposure per offset-ladder version, however many anchors you push.
+- On price ladders every commit re-opens the full top size. On offset boards depth re-opens only when you re-sign the offset ladder, so the top size is exposure per offset-ladder version, however many anchors you push. One anchor entry re-prices both directions of a pair, and each direction keeps its own meter.
 - A fill whose output floors to zero is refused by the executor, and the venue never allocates such a size; there is no dust drain.
 - A block cap does not reduce your depth. It bounds the rate at which a version can be consumed, not the total: an order larger than the cap fills up to the cap this block and the rest of the board is still there in the next one.
 
@@ -310,13 +321,15 @@ To resume after a stop, stream fresh messages with fresher nonces; an older nonc
 
 The executor is the address that matters to you: your messages are signed against it and it is the only address your provider trusts. The venue is where routers read and fill your board.
 
-| Contract | Base (8453), BNB Smart Chain (56) | Base Sepolia (84532) |
-|---|---|---|
-| `PropAMMExecutor` | `0x000000e5Ba94f47C0Fd723F56f1678a841fd33c9` | `0x000000fFA5f8Ae192Ab65204f9B7E062CbF4e05D` |
-| `PropAMMVenue` | `0x000000c3380954F805699A363a25AB374ceEb792` | `0x00000035a8a58f704ab0D567D6c67A486428E35a` |
-| `PropAMMHostedSettlement` | `0x00000011d9e27864CBc458566eAbA42109fF4b0e` | `0x00000011d9e27864CBc458566eAbA42109fF4b0e` |
+Same addresses on Base (8453), BNB Smart Chain (56) and Base Sepolia (84532):
 
-Base Sepolia runs a newer executor whose commit doors skip a faulty message and emit `CommitRejected` instead of reverting the batch. Base and BNB Smart Chain move to it at the same addresses on their next deploy. The executor address is the EIP-712 `verifyingContract`, so a board signed for one generation does not verify against the other. Set it per chain. The other value to recompute per chain is the raw price, which depends on that chain's token decimals.
+| Contract | Address |
+|---|---|
+| `PropAMMExecutor` | `0x000000Bb60AAE6f25cBD9Fc63BB677AB5b8C23dC` |
+| `PropAMMVenue` | `0x0000008792fE035f85b03593e10cF8ee59e69Fa2` |
+| `PropAMMHostedSettlement` | `0x0000002E6a90921B97A933deA6600f5e534f56b8` |
+
+The executor address is the EIP-712 `verifyingContract`, so a board signed for an earlier executor does not verify against this one; your provider's `approvedExecutor` must also be this executor. Between chains only `chainId` changes in the domain. The other value to recompute per chain is the raw price, which depends on that chain's token decimals.
 
 Base Sepolia test tokens, mintable by anyone through `mint(address,uint256)`:
 

@@ -2,16 +2,28 @@
 
 PropAMM is proprietary market-maker liquidity that quotes and settles onchain. Routers integrate it the way they integrate any pool: read prices with an `eth_call`, fill with a deterministic push-payment swap. No API in the hot path, no per-trade requests, no signatures to carry.
 
-One contract per chain, `PropAMMVenue`, merges every registered maker's board best price first and fills through `PropAMMExecutor`, the one contract that can reach maker inventory. The venue stores no prices: it reads each maker's board from the executor on every quote and swap, so what you simulate is what the fill door prices, same levels, same floor rounding, minus the maker's consumed meter and minus whatever that maker's own per-block limit has already used up.
+One contract per chain, `PropAMMVenue`, at the same address on every chain, merges every registered maker's board best price first and fills through `PropAMMExecutor`, the one contract that can reach maker inventory. The venue stores no prices: it reads each maker's board from the executor on every quote and swap, so what you simulate is what the fill door prices, same levels, same floor rounding, minus the maker's consumed meter and minus whatever that maker's own per-block limit has already used up.
 
 ## Addresses
 
-| Contract | Base (8453), BNB Smart Chain (56) | Base Sepolia (84532) |
-|---|---|---|
-| `PropAMMVenue` | `0x000000c3380954F805699A363a25AB374ceEb792` | `0x00000035a8a58f704ab0D567D6c67A486428E35a` |
-| `PropAMMExecutor` | `0x000000e5Ba94f47C0Fd723F56f1678a841fd33c9` | `0x000000fFA5f8Ae192Ab65204f9B7E062CbF4e05D` |
+Same addresses on Base (8453), BNB Smart Chain (56) and Base Sepolia (84532):
 
-Base Sepolia runs a newer executor whose commit doors skip a faulty message and emit `CommitRejected` instead of reverting the batch. Base and BNB Smart Chain move to it at the same addresses on their next deploy.
+| Contract | Address |
+|---|---|
+| `PropAMMVenue` | `0x0000008792fE035f85b03593e10cF8ee59e69Fa2` |
+| `PropAMMExecutor` | `0x000000Bb60AAE6f25cBD9Fc63BB677AB5b8C23dC` |
+
+## The standard pool interface
+
+The venue implements `IPropAMM`, the pool interface proprietary AMMs expose to routers and indexers (`getPairs`, `isActive`, `quote`, `swap` and the `Swapped` event), and its optional extension `IPropAMMFillable` (`quoteFillable`). It reports both through ERC-165:
+
+| `supportsInterface` argument | Interface | Result |
+|---|---|---|
+| `0x01ffc9a7` | ERC-165 | `true` |
+| `0xf723370b` | `IPropAMM` | `true` |
+| `0x7ae84825` | `IPropAMMFillable` | `true` |
+
+A router that already integrates `IPropAMM` pools integrates the venue with no PropAMM-specific code. Everything below that is not part of the standard (`swapWithFee`, `levels`, `board`, `makers`, the fee views, `PropAMMSwap`) is optional.
 
 ## The surface
 
@@ -21,12 +33,14 @@ function getPairs() external view returns (TokenPair[] memory);              // 
 function makers() external view returns (address[] memory);                  // 0x84bd1e70; registered makers by signer address
 function isMaker(address mm) external view returns (bool);                   // 0xe75600c3
 function isActive(address tokenIn, address tokenOut) external view returns (bool); // 0xae131deb; any registered maker has remaining depth
+function supportsInterface(bytes4 interfaceId) external pure returns (bool);  // 0x01ffc9a7; true for ERC-165, IPropAMM, IPropAMMFillable
 function feeBps() external view returns (uint16);                            // 0x24a9d853; protocol fee in bps of gross output
 function feeRecipient() external view returns (address);
 function EXECUTOR() external view returns (address);
 
 // reads
 function quote(address tokenIn, address tokenOut, uint256 amountIn) external view returns (uint256 amountOut); // 0xb6466384
+function quoteFillable(address tokenIn, address tokenOut, uint256 amountIn) external view returns (uint256 fillableAmountIn, uint256 amountOut); // 0x7ae84825
 function levels(address tokenIn, address tokenOut) external view returns (uint256[] memory cumSizes, uint256[] memory prices, uint256 earliestExpiry); // 0x501dc709
 function board(address mm, address tokenIn, address tokenOut) external view returns (uint256[] memory sizes, uint256[] memory prices, uint256 filled, uint256 remaining, uint256 expiresAt); // 0xa5588684; `remaining` is already net of the maker's per-block limit
 
@@ -40,7 +54,9 @@ function swapWithFee(address tokenIn, address tokenOut, uint256 amountIn, uint25
 | `getPairs()` | the advertised pairs in canonical token order; both directions of a pair are tradeable when a maker quotes them |
 | `makers()` | the registered makers, by signer address; the registry is owner-curated and capped at 16 |
 | `isActive(tokenIn, tokenOut)` | true when any registered maker has remaining depth for the direction |
-| `quote(tokenIn, tokenOut, amountIn)` | the exact settlement arithmetic over the merged book, net of the protocol fee; reverts `Inactive` when the venue cannot cover the size |
+| `quote(tokenIn, tokenOut, amountIn)` | the exact settlement arithmetic over the merged book, net of the protocol fee; reverts `Inactive` when the venue cannot cover the size. `IPropAMM` declares it non-view; the venue implements it as `view` |
+| `quoteFillable(tokenIn, tokenOut, amountIn)` | the part of `amountIn` the venue fills right now (never more than `amountIn`) and the output for exactly that part, net of the protocol fee; `(0, 0)` when nothing is fillable. Sizes a partial fill in one call instead of probing `quote` |
+| `supportsInterface(interfaceId)` | ERC-165; `true` for `IPropAMM` and `IPropAMMFillable` |
 | `levels(tokenIn, tokenOut)` | the merged cumulative ladder (cumulative sizes, a price per segment, the earliest expiry among the live boards) in one call |
 | `board(mm, tokenIn, tokenOut)` | one maker's live levels, consumed meter, remaining fillable size and effective expiry, for routers running their own optimizer |
 | `swap(...)` | push-payment fill across makers, `minAmountOut` on the total delivered to `recipient` |
@@ -60,10 +76,10 @@ Boards are kept committed by the network. A direction whose makers have gone dar
 
 ## Read pattern for trackers
 
-1. **Discovery.** `getPairs()` lists the advertised pairs; `makers()` the makers behind them. Pairs appear as makers join; a direction is live when `isActive` is true.
+1. **Discovery.** `getPairs()` lists the advertised pairs; `makers()` the makers behind them. Pairs appear as makers join; a direction is live when `isActive` is true. `supportsInterface` confirms `IPropAMM` and `IPropAMMFillable`.
 2. **Tracking.** Per refresh, either `levels(tokenIn, tokenOut)` for the merged ladder in one call, or `board(mm, tokenIn, tokenOut)` per maker in one multicall pinned to a block. Feed either to your simulator like any ladder-shaped source: cumulative sizes, a price per segment, floor division per segment. The merge is best price first, ties in registry order, each maker's consumed meter already netted.
-3. **Freshness.** Offset boards re-price every second while their drift is non-zero, anchors may be committed every block, and a maker's per-block allowance resets with the block, so a read is exact for the block it was taken in. Re-read each block or on every `AnchorCommitted`, `LadderCommitted`, `OffsetsCommitted`, `ControlsCommitted` and `MMFillExecuted` event for the pairs you track. `earliestExpiry` from `levels` tells you when the merged book, as read, goes dark if nothing is committed.
-4. **Simulation.** `quote` is the settlement arithmetic itself, protocol-fee-net. If you take your own fee, simulate `quote - quote * extraFeePpm / 1e6`; the contract performs the same integer operations, so the two agree to the wei.
+3. **Freshness.** Offset boards re-price every second while their drift is non-zero, anchors may be committed every block, and a maker's per-block allowance resets with the block, so a read is exact for the block it was taken in. Re-read each block or on every `AnchorCommitted`, `LadderCommitted`, `OffsetsCommitted`, `ControlsCommitted` and `MMFillExecuted` event for the pairs you track. An `AnchorCommitted` re-prices both directions of its pair; its `tokenIn` and `tokenOut` name the direction the maker signed. `earliestExpiry` from `levels` tells you when the merged book, as read, goes dark if nothing is committed.
+4. **Simulation.** `quote` is the settlement arithmetic itself, protocol-fee-net. It does not include your own fee: if you take one, simulate `quote - quote * extraFeePpm / 1e6`; the contract performs the same integer operations, so the two agree to the wei. To split an order across venues, `quoteFillable` returns the size the venue covers and the output for exactly that size; a `swap` of `fillableAmountIn` on the same state delivers that output.
 
 ## Swap recipe
 
@@ -118,7 +134,26 @@ Neither fee touches what makers deliver; both come out of the taker's output. Re
 
 ## Events
 
-Every user-facing trade on either lane emits one canonical event at the public entrypoint that settled it:
+A venue swap emits two events for the same trade, in this order: the `IPropAMM` standard `Swapped`, then the PropAMM `PropAMMSwap`. Same trade, same amounts. Index one of them; never add the two together.
+
+```solidity
+event Swapped(
+    address indexed sender,   // the caller of swap or swapWithFee, which paid amountIn
+    address indexed tokenIn,
+    address indexed tokenOut,
+    uint256 amountIn,
+    uint256 amountOut,        // what recipient received, fee-net
+    address recipient
+);
+```
+
+| | Value |
+|---|---|
+| `topic0` | `0x1eeaa4acf3c225a4033105c2647625dbb298dec93b14e16253c4231e26c02b1d` |
+| emitted by | the venue only, once per swap, right before `PropAMMSwap` |
+| use it for | tooling that tracks every proprietary AMM by one topic |
+
+Every user-facing trade on either lane also emits one canonical event at the public entrypoint that settled it:
 
 ```solidity
 event PropAMMSwap(
