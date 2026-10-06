@@ -15,15 +15,16 @@
  * CAP_X is your exposure per tick. Makers whose price moves often but whose shape does not may
  * prefer an offset ladder plus anchors; see price-ladder-streaming.md.
  *
- * Runtime: node 20+, `npm i viem ws`. Fill in the config block and `curveOut`.
+ * Runtime: node 20+, `npm i viem ws`. Fill in the config block and `curveOut`. Set MAKER_PK and
+ * PROPAMM_API_KEY (sent in the x-api-key header) in the environment.
  */
 import { privateKeyToAccount } from "viem/accounts";
 import WebSocket from "ws";
 
 // ---------------------------------------------------------------- config
-const ENDPOINT = "wss://propamm-staging.biconomy.io"; // Base Sepolia; production: wss://propamm.biconomy.io
+const ENDPOINT = "wss://propamm-staging.biconomy.io/v1/ws"; // Base Sepolia; production: wss://propamm.biconomy.io/v1/ws
 const CHAIN_ID = 84532; // Base Sepolia
-const EXECUTOR = "0x000000e5Ba94f47C0Fd723F56f1678a841fd33c9"; // same address on every chain
+const EXECUTOR = "0x000000Bb60AAE6f25cBD9Fc63BB677AB5b8C23dC"; // same address on every chain
 const TOKEN_X = "0x8b414aD7005EeFd315aF2A16538885Eae229bab7"; // MockWETH, 18 decimals
 const TOKEN_Y = "0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df"; // MockUSDC, 18 decimals
 const PROVIDER = "0xYourInventoryContract"; // where fills pull your inventory
@@ -133,7 +134,7 @@ async function sendLadder(ws: WebSocket, tokenIn: string, tokenOut: string): Pro
 }
 
 function main(): void {
-  const ws = new WebSocket(ENDPOINT);
+  const ws = new WebSocket(ENDPOINT, { headers: { "x-api-key": process.env.PROPAMM_API_KEY as string } });
   ws.on("open", () => {
     ws.send(JSON.stringify({ type: "subscribe", data: { type: "price-ledger", mm: account.address } }));
     // Refresh on your own cadence: every curve move, every block, or a fixed interval. Each
