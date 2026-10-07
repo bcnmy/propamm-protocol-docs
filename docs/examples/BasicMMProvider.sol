@@ -119,6 +119,12 @@ contract BasicMMProvider is IMMProvider, Ownable {
         SafeTransferLib.safeTransfer(tokenOut, receiver, delivered);
     }
 
+    /// @inheritdoc IMMProvider
+    /// @dev The inventory is this contract's own balance.
+    function available(address token) external view override returns (uint256) {
+        return SafeTransferLib.balanceOf(token, address(this));
+    }
+
     /// @notice Allow receiving native ETH (e.g. if WETH withdraw lands here during a future
     ///         native-aware variant).
     receive() external payable {}

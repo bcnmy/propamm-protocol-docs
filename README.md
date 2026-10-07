@@ -15,10 +15,11 @@ Two lanes fill through that door:
 
 ## For market makers
 
-- Quote by streaming signed messages over a WebSocket. You send no transactions and hold no gas.
+- Quote by streaming signed messages over a WebSocket. Quoting needs no transactions and no gas; the one optional transaction is `setPaused`, to stop every board at once.
 - Inventory stays in a contract you own and can withdraw from at any time. It releases tokens only to the executor, and the executor only fills against a board you signed, at your prices, within your TTLs and within the depth you signed.
 - Exposure per depth version is its top size, once, however the flow is sliced or spread across blocks and callers.
 - Cap what a single block can take from a board, so one block of adverse flow is bounded even when your stream is behind.
+- Pause every board you have in one transaction from your signing key, with no signed message and no dependency on the network.
 - Make a stale quote cost more: the price widens with the square root of the quote's age, and carries a premium for the first blocks after you move it.
 - Move the price every block for the cost of one storage word per pair by signing anchors: one signature covers every pair you quote, and one entry prices both directions of a pair, each side with its own skew. Re-sign the depth schedule only when sizes, offsets or drift change.
 
@@ -26,7 +27,7 @@ Two lanes fill through that door:
 
 - Integrate one venue address, the same on every chain, like any pool: read the merged book in one `eth_call`, fill with a push-payment `swap`. No API in the hot path. The venue implements the `IPropAMM` pool interface and `IPropAMMFillable`, reports both through ERC-165, and emits the standard `Swapped` event.
 - `quote` is the settlement arithmetic itself, net of the protocol fee, and a size the venue cannot cover reverts in both `quote` and `swap`. `quoteFillable` returns how much of an order the venue fills and the output for exactly that amount, so a splitting router sizes it in one call.
-- A maker's per-block limit is already netted into what you read: `remaining` and `quote` report what is fillable in this block, not what the ladder holds.
+- A maker's per-block limit and what its provider can pay are already netted into what you read: `remaining` and `quote` report what is fillable in this block, not what the ladder holds.
 - Take your own fee with `swapWithFee`, paid to your wallet in the same transaction.
 
 ## For users
@@ -40,8 +41,8 @@ Same addresses on Base (8453), BNB Smart Chain (56) and Base Sepolia (84532):
 
 | Contract | Address |
 |---|---|
-| `PropAMMExecutor` | `0x000000Bb60AAE6f25cBD9Fc63BB677AB5b8C23dC` |
-| `PropAMMVenue` | `0x0000008792fE035f85b03593e10cF8ee59e69Fa2` |
+| `PropAMMExecutor` | `0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26` |
+| `PropAMMVenue` | `0x000000Da21a0f02b2626874870b6447Db220C1EF` |
 | `PropAMMHostedSettlement` | `0x0000002E6a90921B97A933deA6600f5e534f56b8` |
 
 ## Docs

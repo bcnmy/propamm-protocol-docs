@@ -1,6 +1,6 @@
 # Streaming boards
 
-How a maker's prices reach the chain. You sign small EIP-712 messages that describe a board, one per pair and direction, and send them over a WebSocket. The network validates them, stores them and commits them to `PropAMMExecutor`, which holds one board per `(mm, tokenIn, tokenOut)` and prices every fill from it. You send no transactions and pay no gas. Onboarding, the provider contract and endpoints are in [integration.md](integration.md); this page is the message spec.
+How a maker's prices reach the chain. You sign small EIP-712 messages that describe a board, one per pair and direction, and send them over a WebSocket. The network validates them, stores them and commits them to `PropAMMExecutor`, which holds one board per `(mm, tokenIn, tokenOut)` and prices every fill from it. Quoting needs no transactions and no gas (the optional `setPaused` stop is the one exception). Onboarding, the provider contract and endpoints are in [integration.md](integration.md); this page is the message spec.
 
 ## Two forms of a board
 
@@ -22,7 +22,7 @@ Every message is signed against the executor's EIP-712 domain. The executor addr
 | `name` | `PropAMMExecutor` |
 | `version` | `2` |
 | `chainId` | the chain the board lives on |
-| `verifyingContract` | `0x000000Bb60AAE6f25cBD9Fc63BB677AB5b8C23dC` |
+| `verifyingContract` | `0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26` |
 
 The digest your key signs is `keccak256(0x1901 || domainSeparator || structHash)`. `executor.DOMAIN_SEPARATOR()` returns the separator, and the executor exposes the exact digests (`ladderDigest`, `offsetLadderDigest`, `anchorBatchDigest`, `controlsDigest`) and struct hashes (`hashLadder`, `hashOffsetLadder`, `hashAnchorEntry`, `hashAnchorBatch`, `hashControls`) as views, so you can check a signer implementation against the contract without a transaction. Signatures are verified with `isValidSignatureNow(mm, digest, sig)`: a 65-byte ECDSA signature from an EOA `mm`, or any bytes an EIP-1271 contract at `mm` accepts.
 
@@ -84,6 +84,7 @@ struct BoardControls {
     uint256 widenPpmPerSqrtSecond;  // extra discount per square root of a second of quote age; 0 for none
     uint256 premiumPpm;             // extra discount inside the premium window; 0 for none
     uint256 premiumBlocks;          // blocks the premium covers after a commit; 0 for none
+    uint256 expiresAt;              // unix seconds; the message cannot be committed after this
 }
 ```
 
@@ -93,7 +94,7 @@ Type strings, verbatim from the contracts:
 PriceLadder(address mm,address provider,address tokenIn,address tokenOut,Level[] levels,uint256 nonce,uint256 expiresAt)Level(uint256 size,uint256 price)
 OffsetLadder(address mm,address provider,address tokenIn,address tokenOut,Rung[] rungs,uint256 nonce,uint256 expiresAt,uint256 driftPpmPerSecond)Rung(uint256 size,uint256 offsetPpm)
 AnchorBatch(address mm,AnchorEntry[] entries)AnchorEntry(address tokenIn,address tokenOut,uint256 price,uint256 timestampMs,uint256 ttl,uint256 skewPpm,uint256 reverseSkewPpm)
-BoardControls(address mm,address tokenIn,address tokenOut,uint256 nonce,uint256 blockCap,uint256 widenPpmPerSqrtSecond,uint256 premiumPpm,uint256 premiumBlocks)
+BoardControls(address mm,address tokenIn,address tokenOut,uint256 nonce,uint256 blockCap,uint256 widenPpmPerSqrtSecond,uint256 premiumPpm,uint256 premiumBlocks,uint256 expiresAt)
 ```
 
 With a standard EIP-712 library (viem or ethers `signTypedData`) the `types` object is:
@@ -126,12 +127,13 @@ const types = {
     { name: "tokenOut", type: "address" }, { name: "nonce", type: "uint256" },
     { name: "blockCap", type: "uint256" }, { name: "widenPpmPerSqrtSecond", type: "uint256" },
     { name: "premiumPpm", type: "uint256" }, { name: "premiumBlocks", type: "uint256" },
+    { name: "expiresAt", type: "uint256" },
   ],
 } as const;
 const domain = { name: "PropAMMExecutor", version: "2", chainId, verifyingContract: executor };
 ```
 
-Sign the anchor message with `primaryType: "AnchorBatch"`: one signature covers every entry, so nobody can add, drop or alter an entry without invalidating it. Neither the anchor nor the controls carry a `provider`: the provider is bound by the depth message they apply to. An anchor entry carries a `ttl` in place of `expiresAt`: it lives until `timestampMs / 1000 + ttl`. Controls carry no expiry, because they hold until a fresher controls nonce replaces them and they never make a board quote more.
+Sign the anchor message with `primaryType: "AnchorBatch"`: one signature covers every entry, so nobody can add, drop or alter an entry without invalidating it. Neither the anchor nor the controls carry a `provider`: the provider is bound by the depth message they apply to. An anchor entry carries a `ttl` in place of `expiresAt`: it lives until `timestampMs / 1000 + ttl`. A controls message's `expiresAt` is a commit deadline, not a lifetime: once committed, controls hold until a fresher controls nonce replaces them.
 
 ## Validation rules
 
@@ -157,6 +159,7 @@ The stream rejects a message that fails any of these, and the executor skips one
 | every entry names a pair registered for you, in either direction | anchor messages (stream only) |
 | `nonce` fits `uint48` | controls |
 | `blockCap` fits `uint128`, `widenPpmPerSqrtSecond` fits `uint32`, `premiumPpm` below `1_000_000`, `premiumBlocks` fits `uint16` | controls |
+| `expiresAt` fits `uint40` and is not past at commit time (`ControlsExpired()`, the nonce is not consumed); the stream also refuses one more than an hour ahead | controls |
 | signature verifies for `mm` under the executor's domain for `chainId` | all |
 | `provider` equals the provider registered for you on that pair | ladders (stream only) |
 
@@ -217,7 +220,7 @@ Not every signed anchor batch lands onchain. The network commits an anchor when 
 
 ## Board controls
 
-One optional message per board carries the limits the executor applies to every fill of it. Sign it once and it holds until you sign a fresher controls nonce: depth commits and anchors do not clear it. Every field only ever restricts a fill, so a board with no controls, or with all four fields at zero, prices exactly as this page describes everywhere else.
+One optional message per board carries the limits the executor applies to every fill of it. Sign it once and it holds until you sign a fresher controls nonce: depth commits and anchors do not clear it. Its `expiresAt` only bounds when it can be committed: after that second the commit is rejected with `ControlsExpired()` (`CommitRejected` kind 4) and the nonce is not consumed, so a held-back message cannot be committed later to restart the board's age and premium clocks. Sign it a few minutes ahead. Every field only ever restricts a fill, so a board with no controls, or with all four fields at zero, prices exactly as this page describes everywhere else.
 
 | Field | Units | Effect |
 |---|---|---|
@@ -232,7 +235,7 @@ The extra discount is `widenPpmPerSqrtSecond * floor(sqrt(age)) + premiumPpm` in
 
 ### The block cap is visible before the transaction
 
-The cap is not a revert that integrators discover by failing. `board()` reports `remaining` as the smaller of the depth left in the version and what the block has left under the cap, the executor's `quote` returns zero for a size above that, and the venue reads the same number, so the merged book offers you only what you can still fill this block and routes the rest to other makers. A fill that does pass the cap reverts `BlockCapExceeded(blockCap, attempted)`.
+The cap is not a revert that integrators discover by failing. `board()` reports `remaining` as the smallest of the depth left in the version, what the block has left under the cap and what your provider's `available` says it can pay, the executor's `quote` returns zero for a size above that, and the venue reads the same number, so the merged book offers you only what you can still fill this block and routes the rest to other makers. A fill that does pass the cap reverts `BlockCapExceeded(blockCap, attempted)`.
 
 The tally is per block and resets with the block, not with a commit. Two lanes and any number of callers share it.
 
@@ -242,7 +245,7 @@ One boundary worth knowing: a cap binds from the block it is committed in. A boa
 
 - `blockCap` is the size of one block of adverse flow you accept while your stream is behind. A cap well below the board's top size keeps the ladder deep for ordinary flow and still bounds a single bad block. It is not a substitute for the top size, which bounds the whole depth version.
 - `widenPpmPerSqrtSecond` prices staleness. The square root means the first seconds cost the most in relative terms and a long-dead quote does not run away to absurd numbers: at 100 ppm per square root of a second, a one-second quote widens 100 ppm, a four-second quote 200 ppm, a twenty-five-second quote 500 ppm.
-- `premiumPpm` with `premiumBlocks` of 1 or 2 prices the race against your own update, so the block in which you move your price is not the cheapest block in which to take you.
+- `premiumPpm` with `premiumBlocks` of 1 or 2 prices the race against your own update, so the block in which you move your price is not the cheapest block in which to take you. The window restarts on every anchor commit as well as on depth and controls commits, so a maker that anchors every block or flashblock with `premiumBlocks` of 1 or more quotes with the premium almost continuously. Size `premiumPpm` for that, or leave it at 0 and rely on widening.
 - All three compose with the TTLs and the drift you already sign. Controls narrow a board, they never widen what it offers.
 
 ## Prices are in raw token units
@@ -259,7 +262,7 @@ Example, WETH (18 decimals) to USDC (6 decimals) at 2,000 USDC per WETH: `price 
 
 `expiresAt` is unix seconds, must be in the future, and may be at most one hour ahead; the stream rejects anything further out as a likely units mistake (milliseconds instead of seconds). An anchor entry's expiry is `timestampMs / 1000 + ttl`, with `ttl` in seconds and at most 3600.
 
-`BoardControls` has no TTL. It holds until replaced, so it cannot expire into a gap where the board is suddenly uncapped.
+`BoardControls` has no TTL once committed. It holds until replaced, so it cannot expire into a gap where the board is suddenly uncapped. Its `expiresAt` is only the last second it can be committed; sign it a few minutes ahead.
 
 | Message | Typical TTL | Why |
 |---|---|---|
@@ -278,12 +281,14 @@ A message is committed only while it still has a few seconds of life left, so a 
 | Anchor past `timestampMs / 1000 + ttl`, offset ladder fresh | Dark the same way, in both directions of the pair. A fresh anchor (fresher `timestampMs`) makes the board live again immediately, priced off the new anchor, with the meter exactly where it was. |
 | Every rung drifted to a discount of `1e6` or more | Dark (`BoardInactive`), not exhausted. A fresh anchor resets the drift origin. |
 | The block's fill tally has reached `blockCap` | `remaining` reads zero and `quote` returns zero for the rest of the block; the venue routes around you. The next block starts the tally at zero with the same board. |
+| Your provider's `available(tokenOut)` is below what the board would pay | `remaining` shrinks to what the provider can pay and `quote` returns zero for a larger size; the venue routes the rest to other makers. Topping up the provider restores the full board with no new message. |
+| You called `setPaused(true)` on the executor | Every board of yours is dark in both lanes until you call `setPaused(false)`; committed messages and meters are untouched. |
 | Deeper rungs drifted to `1e6`, shallower rungs not | The effective board ends before the first saturated rung; `board()` returns only the live rungs. |
 | Depth fully consumed (`filled == top size`) | Board is live but empty: `remaining` is zero, `fill` reverts `LadderDepthExhausted`. Anchors do not re-open it; a new depth version does. |
 
 `board()` reports the earlier of the depth and anchor expiries as the effective `expiresAt` on an offset board, so a consumer can read one number for "when does this go dark".
 
-Two ways to go dark on purpose, both unilateral. Stop streaming, and every board dies at the TTLs you signed. To kill outstanding quotes before their TTL, sign a tombstone: a depth version with a fresher nonce, a dust top size and a TTL covering the longest outstanding quote. The fresher nonce replaces every level and resets the meter; anything already in flight fills at most the dust.
+Three ways to go dark on purpose, all unilateral. Stop streaming, and every board dies at the TTLs you signed. To kill outstanding quotes before their TTL, sign a tombstone: a depth version with a fresher nonce, a dust top size and a TTL covering the longest outstanding quote. The fresher nonce replaces every level and resets the meter; anything already in flight fills at most the dust. To stop every board at once without the network, call `executor.setPaused(true)` from your signing address (see [integration.md](integration.md#7-going-dark)).
 
 ## Wire format
 
@@ -380,6 +385,7 @@ The server answers `{ "type": "ack" }`. It may also send informational frames of
     "widenPpmPerSqrtSecond": "100",
     "premiumPpm": "500",
     "premiumBlocks": "1",
+    "expiresAt": "1753290300",
     "signature": "0x…65 bytes…",
     "chainId": 84532
   }
@@ -396,7 +402,7 @@ The server answers `{ "type": "ack" }`. It may also send informational frames of
 | `rungs[].offsetPpm` | string | Discount below the anchor in ppm, non-decreasing with depth, below 1e6 |
 | `driftPpmPerSecond` | uint32 as string | Offset widening per second of anchor age; `"0"` disables drift |
 | `nonce` | string | Depth nonce (uint128) for ladders, controls nonce (uint48) for controls; strictly increasing per board |
-| `expiresAt` | unix seconds as string | Ladders only. uint40; at most one hour ahead |
+| `expiresAt` | unix seconds as string | Ladders and controls. uint40; at most one hour ahead. On a ladder the TTL of the board; on controls the last second the message can be committed |
 | `entries` | array | Anchors only. 1 to 32 entries, at most one per pair |
 | `entries[].price` | uint120 as string | Anchor reference price for the signed direction, positive |
 | `entries[].timestampMs` | unix milliseconds as string | When the maker priced the anchor; the drift origin and the pair's ordering key. uint48 |
@@ -442,6 +448,6 @@ Everything the network commits is public state on the executor and readable thro
 
 - `executor.board(mm, tokenIn, tokenOut)` returns `(sizes, prices, filled, remaining, expiresAt, nonce, anchorNonce, mode)`: the levels a fill prices at right now (offset boards resolved against the anchor and drift), the meter, remaining depth, the effective expiry, the depth nonce, `anchorNonce` (the pair's latest `timestampMs`) and the form (`1` price ladder, `2` offset ladder, `0` never committed).
 - `venue.board(mm, tokenIn, tokenOut)` returns the first five of those.
-- `executor.quote(mm, tokenIn, tokenOut, amountIn)` returns what a fill would deliver right now, or zero when the board is dark, cannot cover the size, or the size is above what the block has left under your cap.
+- `executor.quote(mm, tokenIn, tokenOut, amountIn)` returns what a fill would deliver right now, or zero when the board is dark or paused, cannot cover the size, the size is above what the block has left under your cap, or the output is above what your provider's `available` reports.
 - `executor.controls(mm, tokenIn, tokenOut)` returns `(blockCap, widenPpmPerSqrtSecond, premiumPpm, premiumBlocks, controlsNonce, filledThisBlock, lastCommitBlock, committedAt)`: your limits as stored, how much this block has already filled, and the stamps the premium window runs from.
-- Events: `LadderCommitted`, `OffsetsCommitted`, `AnchorCommitted` (one per accepted entry, naming the signed direction) and `ControlsCommitted` when a message is accepted onchain; `CommitRejected(mm, tokenIn, tokenOut, kind, reason)` when a fresher message is refused on its own; `MMFillExecuted(mmProvider, mmSigner, receiver, tokenIn, tokenOut, amountIn, amountOut, avgPrice, filledAfter)` per fill, with `filledAfter` the meter after the fill.
+- Events: `LadderCommitted`, `OffsetsCommitted`, `AnchorCommitted` (one per accepted entry, naming the signed direction) and `ControlsCommitted` when a message is accepted onchain; `CommitRejected(mm, tokenIn, tokenOut, kind, reason)` when a fresher message is refused on its own; `MMFillExecuted(mmProvider, mmSigner, receiver, tokenIn, tokenOut, amountIn, amountOut, avgPrice, filledAfter, caller, nonce, anchorNonce)` per fill, with `filledAfter` the meter after the fill, `caller` the address that called `fill` (the venue, a settlement or a direct taker), `nonce` the depth version and `anchorNonce` the pair anchor's `timestampMs` that priced it; `MakerPaused(mm, paused)` when you pause or resume.
