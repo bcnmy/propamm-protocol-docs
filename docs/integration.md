@@ -18,7 +18,7 @@ What a market maker runs to quote on PropAMM: a provider contract that holds inv
 
 ## 1. The provider contract
 
-You deploy one contract that holds your `tokenOut` inventory and exposes a single fill hook. It implements `IMMProvider`, three functions:
+You deploy one contract that holds your `tokenOut` inventory and exposes a single fill hook. It implements `IMMProvider`, four functions:
 
 ```solidity
 interface IMMProvider {
@@ -33,6 +33,9 @@ interface IMMProvider {
         uint256 amountIn,
         uint256 anchorPrice
     ) external view returns (uint256 amountOut);
+
+    // How much of token you can pay out right now. The executor caps your boards at this.
+    function available(address token) external view returns (uint256);
 
     // The fill. Pull amountIn from msg.sender (the executor), deliver tokenOut to receiver,
     // return the amount delivered.
@@ -51,7 +54,7 @@ Three ways to have one:
 
 - **Off the shelf.** [`examples/BasicMMProvider.sol`](examples/BasicMMProvider.sol), with [`examples/IMMProvider.sol`](examples/IMMProvider.sol), is the reference implementation: inventory holder, executor gate, owner-controlled signer and executor rotation, owner-only withdrawals, no price logic. Both files are byte-for-byte copies of the contracts repository; the import in `BasicMMProvider.sol` assumes the layout `src/interfaces/IMMProvider.sol` and `src/periphery/examples/BasicMMProvider.sol`, and the contract depends on [solady](https://github.com/Vectorized/solady). Deploy it with `(signer, executor, owner)`, fund it, done. You write no Solidity.
 - **The vault you already run.** If your inventory sits in a vault that trusts one router through an ERC-20 allowance, deploy [`examples/RouterVaultProvider.sol`](examples/RouterVaultProvider.sol) with `(vault, signer, executor, owner)`, then from the vault's admin point its router at it and set an allowance per token. The vault keeps the inventory and needs no code change: each fill takes your output from the vault to the receiver and sends the taker's input into the vault, and the allowance is your hard cap. Same layout as above, at `src/periphery/providers/RouterVaultProvider.sol`.
-- **Your own contract.** If your inventory already lives onchain (a pool, a vault, a position), implement the three functions on your existing contract instead. Your funds never move to a new address.
+- **Your own contract.** If your inventory already lives onchain (a pool, a vault, a position), implement the four functions on your existing contract instead. Your funds never move to a new address.
 
 ### What `executeSwap` does
 
@@ -62,6 +65,10 @@ The executor calls it once per fill, after approving your contract for exactly `
 3. Deliver `tokenOut` to `receiver` and return the amount delivered.
 
 `amountOut` is the exact total the executor swept across your signed levels from the board's meter, floored per level, so `BasicMMProvider` delivers it as-is. `anchorPrice` is the volume-weighted average of the same sweep, 1e18-scaled tokenOut per tokenIn, for implementations that shape an order from a price. The executor imposes no output cap of its own; the taker's floor is enforced where the trade settles, so a fill that pays less than the board reverts rather than settling worse. Your contract never sees the ladder, only the resolved output for its fill.
+
+### What `available` reports
+
+`available(token)` is how much of `token` your contract can pay out right now: `BasicMMProvider` returns its own balance, `RouterVaultProvider` the smaller of the vault's balance and its allowance. The executor sizes every board to it: `board()` caps `remaining` at what you can pay and `quote()` returns zero for a larger size, so the venue quotes only what makers can pay and a router is not quoted into a fill that would revert. Keep it a cheap view. The executor reads it with a 50,000 gas budget and uses only the first 32 bytes; a revert, an out-of-gas or a short return counts as unbounded. A wrong answer only shrinks or over-states your own board, never another maker's.
 
 ### Owner controls on `BasicMMProvider`
 
@@ -116,7 +123,7 @@ import { privateKeyToAccount } from "viem/accounts";
 
 const ENDPOINT = "wss://propamm-staging.biconomy.io/v1/ws";
 const CHAIN_ID = 84532;
-const EXECUTOR = "0x000000Bb60AAE6f25cBD9Fc63BB677AB5b8C23dC"; // same address on every chain
+const EXECUTOR = "0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26"; // same address on every chain
 const PROVIDER = "0xYourProviderContract";
 const TOKEN_IN = "0x8b414aD7005EeFd315aF2A16538885Eae229bab7";  // MockWETH, 18 decimals
 const TOKEN_OUT = "0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df"; // MockUSDC, 18 decimals
@@ -198,13 +205,13 @@ A price-ladder maker replaces the two senders with one that signs `PriceLadder` 
 
 ### Risk controls
 
-Between two of your ticks the board is a firm quote that anyone may take. Three optional limits, all signed by you in one `BoardControls` message with its own nonce, bound what that costs. They hold until you sign a fresher controls nonce: depth and anchor commits do not clear them, and each one only ever restricts a fill, so adding them can never make your board offer more than it does today.
+Between two of your ticks the board is a firm quote that anyone may take. Three optional limits, all signed by you in one `BoardControls` message with its own nonce and an `expiresAt` commit deadline, bound what that costs. Once committed they hold until you sign a fresher controls nonce: depth and anchor commits do not clear them, and each one only ever restricts a fill, so adding them can never make your board offer more than it does today.
 
 | Control | What it does | A reasonable starting point |
 |---|---|---|
 | `blockCap` | Bounds the tokenIn any single block may fill from the board, counting every caller and both lanes | A fraction of your top size, sized to one block of adverse flow you accept |
 | `widenPpmPerSqrtSecond` | Adds `widenPpmPerSqrtSecond * floor(sqrt(age))` ppm of discount, where `age` is the quote's age in seconds | 50 to 200 ppm, depending on how fast the pair moves |
-| `premiumPpm` with `premiumBlocks` | Adds `premiumPpm` of discount for that many blocks after you commit depth, an anchor or the controls, counting the commit block as the first | A few hundred ppm for 1 or 2 blocks |
+| `premiumPpm` with `premiumBlocks` | Adds `premiumPpm` of discount for that many blocks after you commit depth, an anchor or the controls, counting the commit block as the first | A few hundred ppm for 1 or 2 blocks. If you anchor every block or flashblock, the premium applies almost continuously: size it for that or keep it at 0 and rely on widening |
 
 ```ts
 const CONTROLS = [
@@ -212,6 +219,7 @@ const CONTROLS = [
   { name: "tokenOut", type: "address" }, { name: "nonce", type: "uint256" },
   { name: "blockCap", type: "uint256" }, { name: "widenPpmPerSqrtSecond", type: "uint256" },
   { name: "premiumPpm", type: "uint256" }, { name: "premiumBlocks", type: "uint256" },
+  { name: "expiresAt", type: "uint256" },
 ] as const;
 
 async function sendControls(ws: WebSocket) {
@@ -222,6 +230,7 @@ async function sendControls(ws: WebSocket) {
     widenPpmPerSqrtSecond: 100n,         // 100 ppm after 1 s, 200 after 4 s, 500 after 25 s
     premiumPpm: 500n,                    // 5 bps extra
     premiumBlocks: 1n,                   // for the block in which the price moves
+    expiresAt: now() + 300n,             // commit deadline, not a lifetime; committed controls hold until replaced
   };
   const signature = await account.signTypedData({
     domain, types: { BoardControls: CONTROLS }, primaryType: "BoardControls", message,
@@ -230,7 +239,7 @@ async function sendControls(ws: WebSocket) {
 }
 ```
 
-Send it once after your first board and again only when the numbers change. The cap is visible to integrators before they send anything: `board()` reports `remaining` as the smaller of your depth left and what the block has left under the cap, the executor's `quote` returns zero above that, and the venue routes the rest of an order to other makers instead of failing it. Read your own state back with `controls(mm, tokenIn, tokenOut)`, which also returns how much this block has already filled.
+Send it once after your first board and again only when the numbers change. Sign `expiresAt` a few minutes ahead: after it the commit is rejected with `ControlsExpired()` (`CommitRejected` kind 4) and the nonce is not consumed, so sign a fresh message if that happens. The cap is visible to integrators before they send anything: `board()` reports `remaining` as the smallest of your depth left, what the block has left under the cap and what your provider's `available` reports, the executor's `quote` returns zero above that, and the venue routes the rest of an order to other makers instead of failing it. Read your own state back with `controls(mm, tokenIn, tokenOut)`, which also returns how much this block has already filled.
 
 Full field semantics, validation rules and the wire frame are in [price-ladder-streaming.md](price-ladder-streaming.md#board-controls).
 
@@ -244,7 +253,7 @@ Full field semantics, validation rules and the wire frame are in [price-ladder-s
 | `MARKET_MAKER_MISMATCH` | payload `mm` differs from the subscribed `mm` | one signer per connection |
 | `RATE_LIMITED` | over 300 board messages per second on the connection | back off |
 | `UNSUPPORTED_CHAIN` | `chainId` not served by this environment | check the environment table |
-| `UPDATE_EXPIRED` | `expiresAt`, or an anchor entry's `timestampMs / 1000 + ttl`, already in the past | clock skew or TTL too short |
+| `UPDATE_EXPIRED` | `expiresAt` (on a ladder or on controls), or an anchor entry's `timestampMs / 1000 + ttl`, already in the past | clock skew or TTL too short |
 | `INVALID_TOKEN_PAIR` | `tokenIn` equals `tokenOut` | fix the pair |
 | `UNREGISTERED_MARKET_MAKER` | signer not registered | complete registration |
 | `INVALID_SIGNATURE` | recovered signer does not match `mm` | check the domain: version `2`, executor address, `chainId`, and the types object |
@@ -262,7 +271,7 @@ Full field semantics, validation rules and the wire frame are in [price-ladder-s
 | Inactivity | 60 seconds without inbound traffic closes the connection; the server pings every 10 seconds and standard libraries answer automatically |
 | Levels or rungs per message | 20 |
 | Entries per anchor message | 32, at most one per pair |
-| `expiresAt` | in the future, at most one hour ahead; board controls carry no expiry |
+| `expiresAt` | in the future, at most one hour ahead, on ladders and on board controls |
 | Anchor `ttl` | 1 to 3600 seconds |
 
 ### Verify
@@ -282,7 +291,7 @@ On the onchain lane the venue quotes from the board, not from `previewSwap`. A p
 ## 6. Inventory sizing
 
 - Inventory is `tokenOut` per direction. A WETH to USDC board pays from your USDC; the incoming WETH lands in your provider and funds the reverse direction if you quote it.
-- The top size of a depth version is your exposure cap for that version: across every route, lane and retry, one version never fills more than its top size, and the most `tokenOut` it can pay is the sum over its levels of `(size_i - size_{i-1}) * price_i / 1e18`. Keep at least that much in the provider, or `executeSwap` reverts and the fill fails (the trade reverts; nothing is lost).
+- The top size of a depth version is your exposure cap for that version: across every route, lane and retry, one version never fills more than its top size, and the most `tokenOut` it can pay is the sum over its levels of `(size_i - size_{i-1}) * price_i / 1e18`. Holding less is safe: the executor caps each board at what `available` reports, so a short provider shows less depth instead of failing fills. If `executeSwap` still cannot pay, the fill reverts and nothing is lost.
 - Both lanes draw on one meter. A hosted fill and a venue fill of the same version consume the same depth.
 - On price ladders every commit re-opens the full top size. On offset boards depth re-opens only when you re-sign the offset ladder, so the top size is exposure per offset-ladder version, however many anchors you push. One anchor entry re-prices both directions of a pair, and each direction keeps its own meter.
 - A fill whose output floors to zero is refused by the executor, and the venue never allocates such a size; there is no dust drain.
@@ -294,14 +303,14 @@ Everything you need to follow your own position is public chain state, so an eng
 
 | What you want to know | Where to read it |
 |---|---|
-| Current inventory | `balanceOf` on your provider address, per token |
+| Current inventory | `balanceOf` on your provider address, per token, or `available(token)` on the provider, the figure the executor sizes your boards to |
 | How much of the live version has been filled | `board(mm, tokenIn, tokenOut)`: `filled` is the meter, `remaining` is what is still fillable right now |
 | What is left under your block cap | `controls(mm, tokenIn, tokenOut)`: `filledThisBlock`, against your `blockCap` |
-| Each fill as it happens | `MMFillExecuted(mmProvider, mmSigner, receiver, tokenIn, tokenOut, amountIn, amountOut, avgPrice, filledAfter)` on the executor, plus `Transfer` on both tokens |
+| Each fill as it happens | `MMFillExecuted(mmProvider, mmSigner, receiver, tokenIn, tokenOut, amountIn, amountOut, avgPrice, filledAfter, caller, nonce, anchorNonce)` on the executor, plus `Transfer` on both tokens |
 | Which of your messages reached the chain | `LadderCommitted`, `OffsetsCommitted`, `AnchorCommitted` and `ControlsCommitted` on the executor |
 | Whether a trade came through a router or a user intent | `PropAMMSwap` at the entrypoint that settled it, with an indexed `lane` topic |
 
-`filledAfter` on `MMFillExecuted` is the meter after that fill, so a single event stream tells you both the trade and the depth left without a follow-up call. Filter the executor by your provider address or your signer address, both indexed. `MMFillExecuted` is one maker leg: a single trade split across makers emits one per maker, so never sum it against `PropAMMSwap` totals.
+`filledAfter` on `MMFillExecuted` is the meter after that fill, so a single event stream tells you both the trade and the depth left without a follow-up call. `caller` is the address that called `fill` (the venue, a hosted settlement or a direct taker), `nonce` the depth version that priced the fill and `anchorNonce` the pair anchor's `timestampMs` that priced it. Filter the executor by your provider address or your signer address, both indexed. `MMFillExecuted` is one maker leg: a single trade split across makers emits one per maker, so never sum it against `PropAMMSwap` totals.
 
 ## 7. Going dark
 
@@ -312,6 +321,7 @@ Every path is unilateral and needs no permission from anyone.
 | Stop streaming | Each board dies at the TTL you signed. `board()` returns no levels, `quote` returns zero, `fill` reverts `BoardInactive`, the venue skips you. | one TTL |
 | Tighten the controls | Sign a fresher controls nonce with a small `blockCap`, or with widening large enough to take the board dark. Applies to every board version until you replace it. | one commit |
 | Tombstone | Sign a depth version with a fresher nonce, a dust top size and a TTL covering the longest outstanding quote. Replaces every level and resets the meter; anything in flight fills at most the dust. | one commit |
+| `executor.setPaused(true)` from your signing address | Every board of yours goes dark at once: fills revert `BoardInactive`, `quote` returns zero, `board()` shows nothing remaining, the venue skips you. Emits `MakerPaused(mm, true)`; `setPaused(false)` brings back whatever is still live, and `makerPaused(mm)` reads the state. Needs no signed message or keeper, so it works even if the network is down; the signing address sends the transaction and pays its gas. | one transaction |
 | `setApprovedExecutor` to another address | Every fill reverts at your provider's gate, whatever boards are committed. | one transaction |
 | `withdraw` | Empties the provider; fills revert for lack of inventory. | one transaction |
 
@@ -325,8 +335,8 @@ Same addresses on Base (8453), BNB Smart Chain (56) and Base Sepolia (84532):
 
 | Contract | Address |
 |---|---|
-| `PropAMMExecutor` | `0x000000Bb60AAE6f25cBD9Fc63BB677AB5b8C23dC` |
-| `PropAMMVenue` | `0x0000008792fE035f85b03593e10cF8ee59e69Fa2` |
+| `PropAMMExecutor` | `0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26` |
+| `PropAMMVenue` | `0x000000Da21a0f02b2626874870b6447Db220C1EF` |
 | `PropAMMHostedSettlement` | `0x0000002E6a90921B97A933deA6600f5e534f56b8` |
 
 The executor address is the EIP-712 `verifyingContract`, so a board signed for an earlier executor does not verify against this one; your provider's `approvedExecutor` must also be this executor. Between chains only `chainId` changes in the domain. The other value to recompute per chain is the raw price, which depends on that chain's token decimals.

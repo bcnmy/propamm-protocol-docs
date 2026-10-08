@@ -8,8 +8,8 @@ You need Foundry (`forge`, `cast`), Node 20 or later, a Base Sepolia RPC URL, a 
 
 | What | Address |
 |---|---|
-| `PropAMMExecutor` (sign against this; set it as `approvedExecutor`) | `0x000000Bb60AAE6f25cBD9Fc63BB677AB5b8C23dC` |
-| `PropAMMVenue` (routers read and fill your board here) | `0x0000008792fE035f85b03593e10cF8ee59e69Fa2` |
+| `PropAMMExecutor` (sign against this; set it as `approvedExecutor`) | `0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26` |
+| `PropAMMVenue` (routers read and fill your board here) | `0x000000Da21a0f02b2626874870b6447Db220C1EF` |
 | MockWETH (18 decimals, mintable) | `0x8b414aD7005EeFd315aF2A16538885Eae229bab7` |
 | MockUSDC (18 decimals, mintable) | `0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df` |
 
@@ -17,8 +17,8 @@ Base (8453) and BNB Smart Chain (56) use the same executor and venue addresses. 
 
 ```bash
 export RPC_URL=<your Base Sepolia RPC>
-export EXECUTOR=0x000000Bb60AAE6f25cBD9Fc63BB677AB5b8C23dC
-export VENUE=0x0000008792fE035f85b03593e10cF8ee59e69Fa2
+export EXECUTOR=0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26
+export VENUE=0x000000Da21a0f02b2626874870b6447Db220C1EF
 export WETH=0x8b414aD7005EeFd315aF2A16538885Eae229bab7
 export USDC=0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df
 export SIGNER=<address of your signing key>
@@ -37,7 +37,7 @@ forge create src/periphery/examples/BasicMMProvider.sol:BasicMMProvider \
 export PROVIDER=<the deployed address>
 ```
 
-`--interactive` prompts for the deployer key so it never appears on the command line. The constructor pins the executor as the only address allowed to call `executeSwap`.
+`--interactive` prompts for the deployer key so it never appears on the command line. The constructor pins the executor as the only address allowed to call `executeSwap`. The provider's `available(token)` returns its own balance of `token`; the executor caps each of your boards at what it can pay, so the inventory you fund in step 2 is also the most your boards show.
 
 ## Step 2: fund it
 
@@ -84,7 +84,7 @@ Every accepted message is answered with `{ "type": "ack" }`. An `error` frame na
 
 ## Step 5: set your risk limits
 
-One more signed message bounds what a board costs you between ticks. It is optional, has its own nonce, and holds until you replace it, so send it once after your first board.
+One more signed message bounds what a board costs you between ticks. It is optional, has its own nonce, and once committed holds until you replace it, so send it once after your first board. Its `expiresAt` is only the last second it can be committed: sign it a few minutes ahead, and if it lapses before the commit (`ControlsExpired()`), sign it again.
 
 ```json
 {
@@ -98,6 +98,7 @@ One more signed message bounds what a board costs you between ticks. It is optio
     "widenPpmPerSqrtSecond": "100",
     "premiumPpm": "500",
     "premiumBlocks": "1",
+    "expiresAt": "<unix seconds, now + 300>",
     "signature": "<EIP-712 signature>",
     "chainId": 84532
   }
@@ -137,16 +138,16 @@ cast call $VENUE "quote(address,address,uint256)(uint256)" $WETH $USDC 100000000
 cast call $VENUE "levels(address,address)(uint256[],uint256[],uint256)" $WETH $USDC --rpc-url $RPC_URL
 ```
 
-`remaining` is the smaller of the depth left in the version and what the current block has left under your `blockCap`, so with the controls above it reads at most 5e18 even on a fresh board.
+`remaining` is the smallest of the depth left in the version, what the current block has left under your `blockCap` and what your provider can pay, so with the controls above it reads at most 5e18 even on a fresh board.
 
-If `board()` returns empty arrays and `remaining == 0`, the board is dark: not yet committed, expired, or (offset form) missing a live anchor for the pair. Check that your messages are acked, that `expiresAt` leaves enough life for the commit to land, and on an offset board that anchors keep flowing.
+If `board()` returns empty arrays and `remaining == 0`, the board is dark: not yet committed, expired, paused with `setPaused(true)`, or (offset form) missing a live anchor for the pair. Check that your messages are acked, that `expiresAt` leaves enough life for the commit to land, and on an offset board that anchors keep flowing. If your levels show but `remaining` is lower than expected, check the provider's inventory: `remaining` never exceeds what its `available` reports.
 
 ## Step 7: watch a fill
 
-When a fill lands you will see `executeSwap` called on your provider, `MMFillExecuted` on the executor with your provider and signer, the amounts and `filledAfter` (the meter after the fill), and `Transfer` events on both tokens. `board()` shows `filled` advanced by the amount and `remaining` reduced, and `controls()` shows `filledThisBlock` for as long as that block lasts. On an offset board the next anchors re-price the remaining depth without resetting the meter; a new offset ladder resets it.
+When a fill lands you will see `executeSwap` called on your provider, `MMFillExecuted` on the executor with your provider and signer, the amounts, `filledAfter` (the meter after the fill), `caller` (the venue, a settlement or a direct taker) and the depth `nonce` and `anchorNonce` that priced it, and `Transfer` events on both tokens. `board()` shows `filled` advanced by the amount and `remaining` reduced, and `controls()` shows `filledThisBlock` for as long as that block lasts. On an offset board the next anchors re-price the remaining depth without resetting the meter; a new offset ladder resets it.
 
 ## What can and cannot happen to your inventory
 
 - Funds leave your provider only through `executeSwap`, called only by the executor, only against a board your key signed, only within that version's once-spent meter, within any per-block cap you signed, and only with the matching `tokenIn` already delivered to the executor.
-- Stop signing and your boards die at their TTLs. For an immediate stop, sign a tombstone (dust top size, fresher nonce) or rotate `approvedExecutor`. `withdraw` is yours at any time.
+- Stop signing and your boards die at their TTLs. For an immediate stop, call `setPaused(true)` on the executor from your signing address (every board of yours goes dark in one transaction; `setPaused(false)` resumes), sign a tombstone (dust top size, fresher nonce) or rotate `approvedExecutor`. `withdraw` is yours at any time.
 - Nothing is held, pulled or approved on your behalf at any point.

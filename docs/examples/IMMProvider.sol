@@ -57,6 +57,17 @@ interface IMMProvider {
         view
         returns (uint256 amountOut);
 
+    /// @notice How much of `token` this provider can deliver right now: its balance, or for a
+    ///         vault the smaller of the vault's balance and the allowance it granted.
+    ///
+    /// @dev The executor sizes every board to this, so `board`, `quote` and the venue never
+    ///      advertise depth the provider cannot pay and a router is never quoted into a revert.
+    ///      Must be a cheap view: the executor reads it with a fixed gas budget and treats a
+    ///      revert, an out-of-gas or a short return as unbounded, so a faulty provider can only
+    ///      lose its own sizing, never break another maker's fills. A provider whose output comes
+    ///      from an external venue rather than held inventory may return `type(uint256).max`.
+    function available(address token) external view returns (uint256);
+
     /// @notice Atomic fill: pull `amountIn` of `tokenIn` from `msg.sender` (the executor), deliver
     ///         the provider's output of `tokenOut` from inventory to `receiver`, return the amount.
     ///

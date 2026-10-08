@@ -10,8 +10,8 @@ Same addresses on Base (8453), BNB Smart Chain (56) and Base Sepolia (84532):
 
 | Contract | Address |
 |---|---|
-| `PropAMMVenue` | `0x0000008792fE035f85b03593e10cF8ee59e69Fa2` |
-| `PropAMMExecutor` | `0x000000Bb60AAE6f25cBD9Fc63BB677AB5b8C23dC` |
+| `PropAMMVenue` | `0x000000Da21a0f02b2626874870b6447Db220C1EF` |
+| `PropAMMExecutor` | `0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26` |
 
 ## The standard pool interface
 
@@ -64,10 +64,11 @@ function swapWithFee(address tokenIn, address tokenOut, uint256 amountIn, uint25
 
 ## What a board is
 
-Every price onchain is a maker-signed board stored in the executor: cumulative sizes with a price per level (either signed absolutely, or as offsets below a maker-signed anchor that may widen with the anchor's age), a nonce and an expiry. Four properties follow, all contract-enforced:
+Every price onchain is a maker-signed board stored in the executor: cumulative sizes with a price per level (either signed absolutely, or as offsets below a maker-signed anchor that may widen with the anchor's age), a nonce and an expiry. Six properties follow, all contract-enforced:
 
 - **Once-spent depth.** A board version can never fill more than its signed top size, across every caller and retry; the meter counts every fill and resets only when the maker commits a new depth version. What you read is what remains fillable.
 - **Per-block limits.** A maker may sign a cap on the volume any single block may take from its board, and widening that grows with the quote's age or applies for a few blocks after it moves its price. All three only ever restrict a fill, and the cap is already netted into what you read: `remaining` is the smaller of the depth left and what the block has left under the cap, and the merge covers the rest of the order from other makers. The venue's own `quote` behaves as it does for any size it cannot cover: it reverts `Inactive` rather than returning a number, and only when the remaining makers cannot carry the order between them. You never have to model the limits yourself. The block's allowance behaves like depth: another trade landing ahead of yours can consume it, and the venue then routes around that maker or your floor reverts the swap, never fills it worse.
+- **Payable depth.** Each maker's board is capped at what its provider reports it can pay out (`available` on the provider), so `remaining`, `quote` and the merge offer only what the maker can deliver. A maker that has paused itself on the executor reads as dark.
 - **Expiry.** A board past its expiry stops quoting and stops filling. On an offset board the anchor has its own expiry and the board is dark when either has passed. `board()` and `levels()` report the effective expiry.
 - **Quote parity.** `quote` replays the executor's per-level floor arithmetic, `out += floor(take * price / 1e18)`, over the same stored levels and the same meter. An `eth_call` on `swap` returns the exact amount a real transaction delivers on the same state.
 - **Coverage.** A size is covered only if every maker it is allocated to would produce non-zero floored output. An allocation that floors to zero (a few wei landing on a maker at a sub-unit price) is dropped and the size is reported as not covered, so `quote` and `swap` both revert `Inactive` for the same sizes. The executor refuses to fill for nothing, and the venue never asks it to.
@@ -78,7 +79,7 @@ Boards are kept committed by the network. A direction whose makers have gone dar
 
 1. **Discovery.** `getPairs()` lists the advertised pairs; `makers()` the makers behind them. Pairs appear as makers join; a direction is live when `isActive` is true. `supportsInterface` confirms `IPropAMM` and `IPropAMMFillable`.
 2. **Tracking.** Per refresh, either `levels(tokenIn, tokenOut)` for the merged ladder in one call, or `board(mm, tokenIn, tokenOut)` per maker in one multicall pinned to a block. Feed either to your simulator like any ladder-shaped source: cumulative sizes, a price per segment, floor division per segment. The merge is best price first, ties in registry order, each maker's consumed meter already netted.
-3. **Freshness.** Offset boards re-price every second while their drift is non-zero, anchors may be committed every block, and a maker's per-block allowance resets with the block, so a read is exact for the block it was taken in. Re-read each block or on every `AnchorCommitted`, `LadderCommitted`, `OffsetsCommitted`, `ControlsCommitted` and `MMFillExecuted` event for the pairs you track. An `AnchorCommitted` re-prices both directions of its pair; its `tokenIn` and `tokenOut` name the direction the maker signed. `earliestExpiry` from `levels` tells you when the merged book, as read, goes dark if nothing is committed.
+3. **Freshness.** Offset boards re-price every second while their drift is non-zero, anchors may be committed every block, and a maker's per-block allowance resets with the block, so a read is exact for the block it was taken in. Re-read each block or on every `AnchorCommitted`, `LadderCommitted`, `OffsetsCommitted`, `ControlsCommitted` and `MMFillExecuted` event for the pairs you track, and on `MakerPaused` for the makers behind them. An `AnchorCommitted` re-prices both directions of its pair; its `tokenIn` and `tokenOut` name the direction the maker signed. `earliestExpiry` from `levels` tells you when the merged book, as read, goes dark if nothing is committed.
 4. **Simulation.** `quote` is the settlement arithmetic itself, protocol-fee-net. It does not include your own fee: if you take one, simulate `quote - quote * extraFeePpm / 1e6`; the contract performs the same integer operations, so the two agree to the wei. To split an order across venues, `quoteFillable` returns the size the venue covers and the output for exactly that size; a `swap` of `fillableAmountIn` on the same state delivers that output.
 
 ## Swap recipe
@@ -115,7 +116,7 @@ amountOut   = net - routerFee                  what recipient receives; minAmoun
 
 `swapWithFee` pays `routerFee` to `feeReceiver` and `amountOut` to `recipient` in the same transaction. `extraFeePpm` above `50_000` reverts `ExtraFeeTooHigh`; a non-zero fee with a zero `feeReceiver` reverts `ZeroFeeReceiver`. There is no fee accrual and no claim function: the balance at `feeReceiver` is the ledger. Alternatively point `recipient` at your own router and take your cut there.
 
-Neither fee touches what makers deliver; both come out of the taker's output. Read `feeBps()` rather than assuming it.
+Neither fee touches what makers deliver; both come out of the taker's output. A swap that takes either fee emits `FeesTaken` (see [Events](#events)). Read `feeBps()` rather than assuming it.
 
 ## Failure semantics
 
@@ -175,15 +176,19 @@ event PropAMMSwap(
 
 The venue emits it once per swap however many makers filled it, and the hosted settlement once per settled intent, so summing one topic never double counts. Per-lane volume is a single indexed-topic filter; per-integrator attribution on the venue is `sender`.
 
-Underneath, the executor emits `MMFillExecuted(address indexed mmProvider, address indexed mmSigner, address indexed receiver, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut, uint256 avgPrice, uint128 filledAfter)` (`topic0` `0x5109ce085e22265a3a2f684f9491113ed3d388e9376388912537ddee1cd851c1`) once per maker leg. Use it for maker attribution, never add it to the `PropAMMSwap` total (a split is one trade and several fills), and note that its `amountOut` is the provider's reported figure, not a measured delta. Fees are ordinary `Transfer` events to `feeRecipient` and to your `feeReceiver`; there is no fee event.
+Underneath, the executor emits `MMFillExecuted(address indexed mmProvider, address indexed mmSigner, address indexed receiver, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut, uint256 avgPrice, uint128 filledAfter, address caller, uint256 nonce, uint256 anchorNonce)` (`topic0` `0x0d885e383bb9ad86c7811413207f8eabfcba2be4399cea97266e37996d46d062`) once per maker leg. `caller` is the address that called `fill` (the venue, a hosted settlement or a direct taker), `nonce` the depth version and `anchorNonce` the pair anchor's `timestampMs` that priced the leg. Use it for maker attribution, never add it to the `PropAMMSwap` total (a split is one trade and several fills), and note that its `amountOut` is the provider's reported figure, not a measured delta.
+
+When a swap takes a protocol fee, a router fee or both, the venue also emits `FeesTaken(uint256 protocolFee, address feeRecipient, uint256 routerFee, address feeReceiver)` (`topic0` `0x2e155316dd41148f34c353563f59940c4496861ec9264f7b97847857203340a5`), with the matching `Transfer` events to `feeRecipient` and your `feeReceiver`. A swap with no fee emits nothing extra. Fees never touch the maker's price.
 
 Board commits emit on the executor: `LadderCommitted`, `OffsetsCommitted`, `AnchorCommitted` and `ControlsCommitted(address indexed mm, address indexed tokenIn, address indexed tokenOut, uint256 nonce, uint256 blockCap, uint32 widenPpmPerSqrtSecond, uint32 premiumPpm, uint16 premiumBlocks)` (`topic0` `0x69e8e8fb513d0e266a4625b592c740340ff2b78653cdc0ed28c76f82187cb04c`). A tracker that keeps a local book re-reads the affected pair on any of them.
+
+A maker that pauses or resumes all of its boards emits `MakerPaused(address indexed mm, bool paused)` (`topic0` `0x834d836e17092c5295a41295522d387774b34ac5e97e3c084cc2e150d772635f`) on the executor.
 
 Registry changes emit `MakerAdded(address indexed mm)`, `MakerRemoved(address indexed mm)`, `PairAdded(address indexed token0, address indexed token1)` and `ProtocolFeeUpdated(uint16 feeBps, address feeRecipient)`.
 
 ## Filling the executor directly
 
-The executor's fill door is permissionless. A router that runs its own merge over per-maker `board()` reads can transfer `amountIn` to the executor and call `fill(address mm, address tokenIn, address tokenOut, uint256 amountIn, address receiver) returns (uint256 delivered)` (`0x3ad4d838`) per maker share in the same transaction. No venue fee applies on this path. Size each share against the `remaining` that `board()` reported, which already accounts for the maker's per-block limit; `controls(address mm, address tokenIn, address tokenOut)` (`0xa0459d51`) returns the limits and the block's tally if you want them separately. The return value is the provider's reported delivery; measure the receiver's balance delta if you enforce a floor, and note that the venue's `PropAMMSwap` is not emitted for direct fills.
+The executor's fill door is permissionless. A router that runs its own merge over per-maker `board()` reads can transfer `amountIn` to the executor and call `fill(address mm, address tokenIn, address tokenOut, uint256 amountIn, address receiver) returns (uint256 delivered)` (`0x3ad4d838`) per maker share in the same transaction. No venue fee applies on this path. Size each share against the `remaining` that `board()` reported, which already accounts for the maker's per-block limit and what its provider can pay; `controls(address mm, address tokenIn, address tokenOut)` (`0xa0459d51`) returns the limits and the block's tally if you want them separately. The return value is the provider's reported delivery; measure the receiver's balance delta if you enforce a floor, and note that the venue's `PropAMMSwap` is not emitted for direct fills.
 
 ## Testing on Base Sepolia
 
