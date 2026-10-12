@@ -47,11 +47,11 @@ Both lanes end in the executor, the one contract a maker's inventory trusts. Its
 
 ### Boards
 
-A board is one maker's depth schedule for one direction, keyed by `(mm, tokenIn, tokenOut)`. The reverse direction is a separate board with its own depth nonce, meter and controls; the anchor is shared by both directions of a pair. A maker describes a board in one of two forms, both signed EIP-712 against the executor's domain (name `PropAMMExecutor`, version `2`, the chain id and the executor address) by an EOA or an EIP-1271 contract:
+A board is one maker's depth schedule for one direction, keyed by `(mm, tokenIn, tokenOut)`. The reverse direction is a separate board with its own depth nonce, meter and controls; the anchor is shared by both directions of a pair. A maker describes a board in one of two forms, both signed EIP-712 against the executor's domain (name `PropAMMExecutor`, version `2`, the chain id and the executor address) by an EOA or an EIP-1271 contract (ECDSA is checked first; an EIP-1271 check runs under a fixed budget of 150,000 gas):
 
 | Form | Message | Commit | Price of a level |
 |---|---|---|---|
-| Price ladder | `PriceLadder`: `Level[] levels`, each `(size, price)` | `updatePrices` | `price`, 1e18-scaled tokenOut per tokenIn |
+| Price ladder | `PriceLadder`: `Level[] levels`, each `(size, price)`, plus `timestampMs`, when the maker priced it | `updatePrices` | `price`, 1e18-scaled tokenOut per tokenIn |
 | Offset ladder plus pair anchor | `OffsetLadder`: `Rung[] rungs`, each `(size, offsetPpm)`, plus `driftPpmPerSecond`; an `AnchorEntry` in a signed `AnchorBatch`: `price`, `timestampMs`, `ttl`, `skewPpm`, `reverseSkewPpm` | `updateOffsets`, `updateAnchors` | `anchor * (1e6 - offsetPpm - driftPpmPerSecond * age - skewPpm) / 1e6`, floored, where `age` is whole seconds since the anchor's `timestampMs` and `skewPpm` is this direction's side of the pair |
 
 `size` is cumulative: the total tokenIn volume available up to and including that level. Sizes strictly ascend from above zero, prices never improve with depth, offsets never decrease with depth and stay below one whole unit, and a board holds at most `MAX_LEVELS` (20) levels. The provider that fills the board rides inside the signed depth message, so a caller cannot redirect a fill to a different inventory.
@@ -69,22 +69,22 @@ A board may carry one `BoardControls` message, signed separately, with its own n
 | Field | Effect |
 |---|---|
 | `blockCap` | The most `tokenIn` any single block may fill from this board, across both lanes and every caller. Zero disables it. |
-| `widenPpmPerSqrtSecond` | An extra discount of `widenPpmPerSqrtSecond * floor(sqrt(age))` parts per million, where `age` is the quote's age in seconds. Zero disables it. |
+| `widenPpmPerSqrtSecond` | An extra discount of `ceil(sqrt(widenPpmPerSqrtSecond^2 * age))` parts per million, where `age` is the quote's age in seconds. Zero disables it. |
 | `premiumPpm` | An extra discount applied for `premiumBlocks` blocks after the maker commits depth, an anchor or the controls, counting the commit block as the first. Zero disables it. |
 | `premiumBlocks` | How many blocks that premium covers. |
 | `expiresAt` | Unix seconds; the message cannot be committed after it. Once committed, the controls apply until a higher nonce replaces them. |
 
-The extra discount is `widenPpmPerSqrtSecond * floor(sqrt(age)) + premiumPpm` inside the premium window and the widening term alone outside it, and it is applied on top of whatever the board already prices: it multiplies a price ladder's levels and adds to an offset ladder's offsets. Age is measured from the anchor's signed `timestampMs` on an offset board and from the commit that wrote the board on a price ladder; a controls commit restarts both the age origin and the premium window. A first level whose total discount reaches one whole unit takes the board dark (`BoardInactive`) rather than quoting at zero. Because the premium window restarts on every anchor commit, a maker that anchors every block or flashblock with `premiumBlocks` of 1 or more quotes with the premium almost continuously.
+The extra discount is `ceil(sqrt(widenPpmPerSqrtSecond^2 * age)) + premiumPpm` inside the premium window and the widening term alone outside it, and it is applied on top of whatever the board already prices: it multiplies a price ladder's levels and adds to an offset ladder's offsets. Age is measured from the anchor's signed `timestampMs` on an offset board and from the ladder's signed `timestampMs` on a price ladder (or from the commit, if that is earlier), so a ladder committed late still ages from when the maker priced it. A controls commit restarts the premium window but never the age, so widening added to an already old board applies at once. A first level whose total discount reaches one whole unit takes the board dark (`BoardInactive`) rather than quoting at zero. Because the premium window restarts on every anchor commit, a maker that anchors every block or flashblock with `premiumBlocks` of 1 or more quotes with the premium almost continuously.
 
 The cap is visible before anyone sends a transaction. `board()` reports `remaining` as the smallest of the depth left in the version, the volume the block has left under the cap and what the provider can pay (see [the maker provider](#maker-provider-immprovider)), and `quote` returns zero for a size above that. The venue reads the same number, so a capped maker contributes only what it may still fill and the merge covers the rest from other makers.
 
-`controls(mm, tokenIn, tokenOut)` returns the four settings, the controls nonce, how much `tokenIn` this block has already filled, and the block and timestamp of the last commit that started a premium window.
+`controls(mm, tokenIn, tokenOut)` returns the four settings, the controls nonce, how much `tokenIn` this block has already filled, the block the premium window runs from and, on a price board, its age origin in unix seconds.
 
 ### The fill door
 
 `fill(mm, tokenIn, tokenOut, amountIn, receiver)` is the only way inventory moves. The caller has already transferred `amountIn` of `tokenIn` to the executor. The executor:
 
-1. rejects a zero `amountIn`, a board that is not live and a maker that has paused itself;
+1. rejects a zero `amountIn`, a board that is not live, a maker that has paused itself and a `tokenIn` or `tokenOut` with no code (`TokenWithoutCode`);
 2. reads `provider.signer()` and requires it to equal `mm`, so a self-signed board cannot name someone else's provider and a rotated signer invalidates stale bindings;
 3. sweeps the board from the meter: starting at `filled`, it consumes each level's remaining size at that level's current price, `out += floor(take * price / 1e18)`, and reverts `LadderDepthExhausted` if the order runs past the top size; a sweep whose output floors to zero reverts `ZeroPrice`;
 4. advances `filled` by `amountIn`, and when the board carries a block cap, adds `amountIn` to this block's tally and reverts `BlockCapExceeded(blockCap, attempted)` if the tally would pass the cap;
@@ -108,8 +108,8 @@ Fills price at the board current at execution, never at calldata. A fill that la
 | `fill(address mm, address tokenIn, address tokenOut, uint256 amountIn, address receiver) returns (uint256 delivered)` | anyone, input pre-transferred | The fill door; returns what the provider reported |
 | `setPaused(bool paused)` | the maker's signing address | Darken (`true`) or restore (`false`) every board of the caller |
 | `makerPaused(address mm) returns (bool)` | view | Whether the maker has paused itself |
-| `board(address mm, address tokenIn, address tokenOut) returns (uint256[] sizes, uint256[] prices, uint256 filled, uint256 remaining, uint256 expiresAt, uint256 nonce, uint256 anchorNonce, uint8 mode)` | view | The live board as fills price it now; a dark or paused board returns no levels and zero remaining |
-| `quote(address mm, address tokenIn, address tokenOut, uint256 amountIn) returns (uint256 amountOut)` | view | What `fill` would deliver, or zero when dark, paused, too large or more than the provider can pay |
+| `board(address mm, address tokenIn, address tokenOut) returns (uint256[] sizes, uint256[] prices, uint256 filled, uint256 remaining, uint256 expiresAt, uint256 nonce, uint256 anchorNonce, uint8 mode)` | view | The live board as fills price it now; a dark or paused board, or one whose provider no longer names `mm` as its signer, returns no levels and zero remaining |
+| `quote(address mm, address tokenIn, address tokenOut, uint256 amountIn) returns (uint256 amountOut)` | view | What `fill` would deliver, or zero when dark, paused, signed by a key the provider no longer names, too large or more than the provider can pay |
 | `controls(address mm, address tokenIn, address tokenOut) returns (uint256 blockCap, uint256 widenPpmPerSqrtSecond, uint256 premiumPpm, uint256 premiumBlocks, uint256 controlsNonce, uint256 filledThisBlock, uint256 lastCommitBlock, uint256 committedAt)` | view | The board's controls and what this block has already filled |
 | `providerOf(address mm, address tokenIn, address tokenOut) returns (address)` | view | The provider bound at the last depth commit |
 | `hashLadder(PriceLadder)`, `hashOffsetLadder(OffsetLadder)`, `hashAnchorEntry(AnchorEntry)`, `hashAnchorBatch(address mm, AnchorEntry[] entries)`, `hashControls(BoardControls)` | pure | EIP-712 struct hashes |
@@ -123,7 +123,7 @@ Events: `LadderCommitted`, `OffsetsCommitted`, `AnchorCommitted` (one per accept
 
 The maker's inventory contract, either `BasicMMProvider` or the maker's own. Four functions: `signer()` (EOA or EIP-1271; checked on every fill against the board's `mm`), `previewSwap` (a view the network quotes hosted flow from; may apply the maker's own dynamics over the price it is handed, or return zero to decline), `available(token)` (how much of `token` the provider can pay out now; `BasicMMProvider` returns its balance) and `executeSwap` (gated on `approvedExecutor`; pulls `amountIn` from the executor and delivers `tokenOut` to the receiver, returning the amount). The executor hands the provider the exact swept total to deliver.
 
-The executor sizes every board to `available`: `board()` caps `remaining` at what the provider can pay and `quote()` returns zero for a larger size, so the venue quotes only what makers can pay. `available` is read with a 50,000 gas budget and only its first 32 bytes are used; a revert, an out-of-gas or a short return counts as unbounded. A wrong or failing answer only shrinks or over-states that maker's own board, never another maker's.
+The executor sizes every board to `available`: `board()` caps `remaining` at what the provider can pay and `quote()` returns zero for a larger size, so the venue quotes only what makers can pay. `available` is read with a 50,000 gas budget and only its first 32 bytes are used; a revert, an out-of-gas or a short return counts as unbounded, and a provider with nothing left reports no room. A wrong or failing answer only shrinks or over-states that maker's own board, never another maker's.
 
 A maker can darken every board of theirs in one transaction with `executor.setPaused(true)` from its signing address, and restore them with `setPaused(false)`. Fills revert `BoardInactive`, `quote` returns zero and `board()` shows nothing remaining. No signed message or keeper is involved, so this works even when the network is down.
 
@@ -215,10 +215,10 @@ sequenceDiagram
 |---|---|---|
 | Maker signature on every commit | Anyone posting a price the maker did not sign | `updatePrices`, `updateOffsets`, `updateAnchors` (once per batch) and `updateControls` verify the maker's EIP-712 signature (EOA or EIP-1271) before writing anything |
 | Signed provider field | Redirecting a fill to a different inventory | `provider` is inside the signed depth message and bound at commit |
-| Provider-signer check | Filling someone else's provider with a self-signed board | `provider.signer()` must equal the board's `mm`, checked on every fill |
+| Provider-signer check | Filling someone else's provider with a self-signed board | `provider.signer()` must equal the board's `mm`, checked on every fill; `board()` and `quote` report a board dark once it does not, so the venue stops quoting a rotated key at once |
 | Maker-signed TTLs | Stale price pickoff | A depth version fills only until its `expiresAt`; an offset board also needs an unexpired pair anchor |
 | Signed block cap | One block of adverse flow clearing the whole board | `blockCap` bounds the `tokenIn` any single block may fill, across both lanes and every caller; `board()` and `quote` report the bound before a transaction is sent |
-| Age widening | Taking a quote the maker has not been able to refresh | The price widens by `widenPpmPerSqrtSecond * floor(sqrt(age))` ppm, so a stale quote costs the taker more the staler it is |
+| Age widening | Taking a quote the maker has not been able to refresh | The price widens by `ceil(sqrt(widenPpmPerSqrtSecond^2 * age))` ppm, so a stale quote costs the taker more the staler it is |
 | Post-move premium | Racing the maker's own price update inside the same block | `premiumPpm` applies for `premiumBlocks` after a commit, counting the commit block as the first |
 | Maker pause | Fills the maker wants stopped while the network is unavailable | `setPaused(true)` from the maker's signing address darkens all of its boards in one transaction |
 | Per-version meter | Draining a price beyond its signed size | `filled` counts every fill of the version across all callers; the sweep reverts past the top size; only a fresher depth commit resets it |

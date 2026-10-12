@@ -112,7 +112,7 @@ contract BasicMMProvider is IMMProvider, Ownable {
         address receiver
     ) external override returns (uint256 delivered) {
         if (msg.sender != approvedExecutor) revert NotApprovedExecutor();
-        // Pull tokenIn from the executor (it pre-approved this contract on first encounter).
+        // Pull tokenIn from the executor, which approves exactly amountIn for this fill and revokes after.
         SafeTransferLib.safeTransferFrom(tokenIn, msg.sender, address(this), amountIn);
         // Compute our own output from the fresh anchor price and release it from inventory.
         delivered = amountOut; // exact swept output from the executor
@@ -124,8 +124,4 @@ contract BasicMMProvider is IMMProvider, Ownable {
     function available(address token) external view override returns (uint256) {
         return SafeTransferLib.balanceOf(token, address(this));
     }
-
-    /// @notice Allow receiving native ETH (e.g. if WETH withdraw lands here during a future
-    ///         native-aware variant).
-    receive() external payable {}
 }

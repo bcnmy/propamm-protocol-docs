@@ -10,8 +10,8 @@ Same addresses on Base (8453), BNB Smart Chain (56) and Base Sepolia (84532):
 
 | Contract | Address |
 |---|---|
-| `PropAMMVenue` | `0x000000Da21a0f02b2626874870b6447Db220C1EF` |
-| `PropAMMExecutor` | `0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26` |
+| `PropAMMVenue` | `0x0000005880209CB9387C5904237ECeF97158DB69` |
+| `PropAMMExecutor` | `0x000000fC9858a020bCE252cE21C6D539388dcD88` |
 
 ## The standard pool interface
 
@@ -132,6 +132,7 @@ Neither fee touches what makers deliver; both come out of the taker's output. A 
 | `BoardInactive()` | `0x05f04ee8` | executor, direct `fill` only | a board went dark between your read and your fill. The venue plans and fills against the same reads inside one transaction, so its swaps raise `Inactive` instead |
 | `LadderDepthExhausted()` | `0x3623b693` | executor, direct `fill` only | a leg ran past the version's remaining depth. Same reasoning: through the venue this is `Inactive` |
 | `BlockCapExceeded(uint256 blockCap, uint256 attempted)` | `0x51c3dffc` | executor | a leg would take more than the maker allows in one block. Not reachable through `quote` and `swap`, which read the same bound; direct callers of `fill` should read `remaining` first |
+| `TokenWithoutCode()` | `0xbd48a9af` | executor, direct `fill` only | `tokenIn` or `tokenOut` has no contract code; nothing is moved |
 
 ## Events
 

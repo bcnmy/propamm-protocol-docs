@@ -8,8 +8,8 @@ You need Foundry (`forge`, `cast`), Node 20 or later, a Base Sepolia RPC URL, a 
 
 | What | Address |
 |---|---|
-| `PropAMMExecutor` (sign against this; set it as `approvedExecutor`) | `0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26` |
-| `PropAMMVenue` (routers read and fill your board here) | `0x000000Da21a0f02b2626874870b6447Db220C1EF` |
+| `PropAMMExecutor` (sign against this; set it as `approvedExecutor`) | `0x000000fC9858a020bCE252cE21C6D539388dcD88` |
+| `PropAMMVenue` (routers read and fill your board here) | `0x0000005880209CB9387C5904237ECeF97158DB69` |
 | MockWETH (18 decimals, mintable) | `0x8b414aD7005EeFd315aF2A16538885Eae229bab7` |
 | MockUSDC (18 decimals, mintable) | `0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df` |
 
@@ -17,8 +17,8 @@ Base (8453) and BNB Smart Chain (56) use the same executor and venue addresses. 
 
 ```bash
 export RPC_URL=<your Base Sepolia RPC>
-export EXECUTOR=0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26
-export VENUE=0x000000Da21a0f02b2626874870b6447Db220C1EF
+export EXECUTOR=0x000000fC9858a020bCE252cE21C6D539388dcD88
+export VENUE=0x0000005880209CB9387C5904237ECeF97158DB69
 export WETH=0x8b414aD7005EeFd315aF2A16538885Eae229bab7
 export USDC=0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df
 export SIGNER=<address of your signing key>
@@ -56,7 +56,7 @@ Send the network your signer address, your provider address and the directions y
 
 Connect to `wss://propamm-staging.biconomy.io/v1/ws` with your API key in the `x-api-key` header, subscribe as your signer, and send boards. Pick one of the two forms.
 
-**A price ladder.** Sign a `PriceLadder` per direction on every tick: cumulative sizes, absolute prices, a strictly increasing nonce, a TTL of tens of seconds. With both mock tokens at 18 decimals, 2,000 USDC per WETH is `price = 2000e18` for WETH to USDC and `5e14` for USDC to WETH (`1e18 / 2000`).
+**A price ladder.** Sign a `PriceLadder` per direction on every tick: cumulative sizes, absolute prices, a strictly increasing nonce, a `timestampMs` of when you priced it, a TTL of tens of seconds. With both mock tokens at 18 decimals, 2,000 USDC per WETH is `price = 2000e18` for WETH to USDC and `5e14` for USDC to WETH (`1e18 / 2000`).
 
 ```json
 {
@@ -71,6 +71,7 @@ Connect to `wss://propamm-staging.biconomy.io/v1/ws` with your API key in the `x
       { "size": "3000000000000000000", "price": "1995000000000000000000" }
     ],
     "nonce": "<unix milliseconds>",
+    "timestampMs": "<unix milliseconds, when you priced it>",
     "expiresAt": "<unix seconds, now + 30>",
     "signature": "<EIP-712 signature>",
     "chainId": 84532
@@ -112,7 +113,7 @@ cast call $EXECUTOR "controls(address,address,address)(uint256,uint256,uint256,u
   $SIGNER $WETH $USDC --rpc-url $RPC_URL
 ```
 
-The returns are `blockCap`, `widenPpmPerSqrtSecond`, `premiumPpm`, `premiumBlocks`, the controls nonce, `filledThisBlock`, and the block and timestamp of the last commit that started a premium window. Field semantics and how to choose the numbers are in [integration.md](integration.md#risk-controls).
+The returns are `blockCap`, `widenPpmPerSqrtSecond`, `premiumPpm`, `premiumBlocks`, the controls nonce, `filledThisBlock`, the block the premium window runs from and, on a price board, its age origin in unix seconds. Field semantics and how to choose the numbers are in [integration.md](integration.md#risk-controls).
 
 ## Step 6: verify with `board()`
 
@@ -140,7 +141,7 @@ cast call $VENUE "levels(address,address)(uint256[],uint256[],uint256)" $WETH $U
 
 `remaining` is the smallest of the depth left in the version, what the current block has left under your `blockCap` and what your provider can pay, so with the controls above it reads at most 5e18 even on a fresh board.
 
-If `board()` returns empty arrays and `remaining == 0`, the board is dark: not yet committed, expired, paused with `setPaused(true)`, or (offset form) missing a live anchor for the pair. Check that your messages are acked, that `expiresAt` leaves enough life for the commit to land, and on an offset board that anchors keep flowing. If your levels show but `remaining` is lower than expected, check the provider's inventory: `remaining` never exceeds what its `available` reports.
+If `board()` returns empty arrays and `remaining == 0`, the board is dark: not yet committed, expired, paused with `setPaused(true)`, signed by a key your provider's `signer()` no longer returns, or (offset form) missing a live anchor for the pair. Check that your messages are acked, that `expiresAt` leaves enough life for the commit to land, and on an offset board that anchors keep flowing. If your levels show but `remaining` is lower than expected, check the provider's inventory: `remaining` never exceeds what its `available` reports.
 
 ## Step 7: watch a fill
 

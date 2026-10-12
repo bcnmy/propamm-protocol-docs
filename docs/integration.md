@@ -53,7 +53,7 @@ interface IMMProvider {
 Three ways to have one:
 
 - **Off the shelf.** [`examples/BasicMMProvider.sol`](examples/BasicMMProvider.sol), with [`examples/IMMProvider.sol`](examples/IMMProvider.sol), is the reference implementation: inventory holder, executor gate, owner-controlled signer and executor rotation, owner-only withdrawals, no price logic. Both files are byte-for-byte copies of the contracts repository; the import in `BasicMMProvider.sol` assumes the layout `src/interfaces/IMMProvider.sol` and `src/periphery/examples/BasicMMProvider.sol`, and the contract depends on [solady](https://github.com/Vectorized/solady). Deploy it with `(signer, executor, owner)`, fund it, done. You write no Solidity.
-- **The vault you already run.** If your inventory sits in a vault that trusts one router through an ERC-20 allowance, deploy [`examples/RouterVaultProvider.sol`](examples/RouterVaultProvider.sol) with `(vault, signer, executor, owner)`, then from the vault's admin point its router at it and set an allowance per token. The vault keeps the inventory and needs no code change: each fill takes your output from the vault to the receiver and sends the taker's input into the vault, and the allowance is your hard cap. Same layout as above, at `src/periphery/providers/RouterVaultProvider.sol`.
+- **The vault you already run.** If your inventory sits in a vault that trusts one router through an ERC-20 allowance, deploy [`examples/RouterVaultProvider.sol`](examples/RouterVaultProvider.sol) with `(vault, signer, executor, owner)`, then from the vault's admin point its router at it and set an allowance per token. The vault keeps the inventory and needs no code change: each fill takes your output from the vault to the receiver and sends the taker's input into the vault, and the allowance is your hard cap. Its `signer` and `approvedExecutor` are fixed at deployment and the owner can only rescue tokens sent to the contract by mistake, so rotating the key or moving to a new executor means deploying a new provider and pointing the vault's router at it with `setRouter`. Same layout as above, at `src/periphery/providers/RouterVaultProvider.sol`.
 - **Your own contract.** If your inventory already lives onchain (a pool, a vault, a position), implement the four functions on your existing contract instead. Your funds never move to a new address.
 
 ### What `executeSwap` does
@@ -74,7 +74,7 @@ The executor calls it once per fill, after approving your contract for exactly `
 
 | Function | Effect |
 |---|---|
-| `setSigner(address)` | Rotate the signing key. Boards signed by the old key stop filling at once, because the executor checks `provider.signer() == mm` on every fill. Stream fresh boards under the new key. |
+| `setSigner(address)` | Rotate the signing key. Boards signed by the old key stop filling at once, because the executor checks `provider.signer() == mm` on every fill, and `board()` and `quote` report them dark, so the venue stops quoting them in the same block. Stream fresh boards under the new key. |
 | `setApprovedExecutor(address)` | Rotate the trusted executor. Pointing it anywhere but the executor is an instant hard stop: every fill reverts at your gate. |
 | `withdraw(token, amount, to)` | Withdraw inventory at any time. |
 
@@ -82,7 +82,7 @@ Use an owner multisig in production.
 
 ## 2. The signing key
 
-The key that signs your boards is `mm` in every message: the board key onchain, the address the venue registers, and the value your provider's `signer()` must return. An EOA works with a 65-byte ECDSA signature; a contract works through EIP-1271. One key can sign for many pairs, directions and chains. The EIP-712 domain is the executor's (`PropAMMExecutor`, version `2`, the chain id, the executor address), and the executor address is the same on every chain, so a signer validated on Base Sepolia moves to another chain by changing `chainId`.
+The key that signs your boards is `mm` in every message: the board key onchain, the address the venue registers, and the value your provider's `signer()` must return. An EOA works with a 65-byte ECDSA signature; a contract works through EIP-1271. The executor tries ECDSA first and gives an EIP-1271 check a fixed budget of 150,000 gas; a contract signer that needs more is rejected. One key can sign for many pairs, directions and chains. The EIP-712 domain is the executor's (`PropAMMExecutor`, version `2`, the chain id, the executor address), and the executor address is the same on every chain, so a signer validated on Base Sepolia moves to another chain by changing `chainId`.
 
 Signatures are standard EIP-712 (`signTypedData` in viem or ethers); the types object and struct layouts are in [price-ladder-streaming.md](price-ladder-streaming.md).
 
@@ -123,7 +123,7 @@ import { privateKeyToAccount } from "viem/accounts";
 
 const ENDPOINT = "wss://propamm-staging.biconomy.io/v1/ws";
 const CHAIN_ID = 84532;
-const EXECUTOR = "0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26"; // same address on every chain
+const EXECUTOR = "0x000000fC9858a020bCE252cE21C6D539388dcD88"; // same address on every chain
 const PROVIDER = "0xYourProviderContract";
 const TOKEN_IN = "0x8b414aD7005EeFd315aF2A16538885Eae229bab7";  // MockWETH, 18 decimals
 const TOKEN_OUT = "0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df"; // MockUSDC, 18 decimals
@@ -201,7 +201,7 @@ ws.on("open", async () => {
 ws.on("close", () => process.exit(1));                     // let a supervisor restart for a clean reconnect
 ```
 
-A price-ladder maker replaces the two senders with one that signs `PriceLadder` (`levels` of `{ size, price }`, `primaryType: "PriceLadder"`) on every tick and sends it as `type: "price-ladder"`. A runnable variant that samples a pricing curve into a ladder is in [`examples/curve-maker-reference.ts`](examples/curve-maker-reference.ts). Stream both directions of a pair if you want to serve both; each direction is its own board with its own depth nonce, meter and controls, and one anchor entry prices both.
+A price-ladder maker replaces the two senders with one that signs `PriceLadder` (`levels` of `{ size, price }` and `timestampMs`, the unix milliseconds you priced it at, `primaryType: "PriceLadder"`) on every tick and sends it as `type: "price-ladder"`. A runnable variant that samples a pricing curve into a ladder is in [`examples/curve-maker-reference.ts`](examples/curve-maker-reference.ts). Stream both directions of a pair if you want to serve both; each direction is its own board with its own depth nonce, meter and controls, and one anchor entry prices both.
 
 ### Risk controls
 
@@ -210,7 +210,7 @@ Between two of your ticks the board is a firm quote that anyone may take. Three 
 | Control | What it does | A reasonable starting point |
 |---|---|---|
 | `blockCap` | Bounds the tokenIn any single block may fill from the board, counting every caller and both lanes | A fraction of your top size, sized to one block of adverse flow you accept |
-| `widenPpmPerSqrtSecond` | Adds `widenPpmPerSqrtSecond * floor(sqrt(age))` ppm of discount, where `age` is the quote's age in seconds | 50 to 200 ppm, depending on how fast the pair moves |
+| `widenPpmPerSqrtSecond` | Adds `ceil(sqrt(widenPpmPerSqrtSecond^2 * age))` ppm of discount, where `age` is the quote's age in seconds | 50 to 200 ppm, depending on how fast the pair moves |
 | `premiumPpm` with `premiumBlocks` | Adds `premiumPpm` of discount for that many blocks after you commit depth, an anchor or the controls, counting the commit block as the first | A few hundred ppm for 1 or 2 blocks. If you anchor every block or flashblock, the premium applies almost continuously: size it for that or keep it at 0 and rely on widening |
 
 ```ts
@@ -335,9 +335,9 @@ Same addresses on Base (8453), BNB Smart Chain (56) and Base Sepolia (84532):
 
 | Contract | Address |
 |---|---|
-| `PropAMMExecutor` | `0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26` |
-| `PropAMMVenue` | `0x000000Da21a0f02b2626874870b6447Db220C1EF` |
-| `PropAMMHostedSettlement` | `0x0000002E6a90921B97A933deA6600f5e534f56b8` |
+| `PropAMMExecutor` | `0x000000fC9858a020bCE252cE21C6D539388dcD88` |
+| `PropAMMVenue` | `0x0000005880209CB9387C5904237ECeF97158DB69` |
+| `PropAMMHostedSettlement` | `0x000000dC71C3A53B1c587F122c2f9F8F73ce008C` |
 
 The executor address is the EIP-712 `verifyingContract`, so a board signed for an earlier executor does not verify against this one; your provider's `approvedExecutor` must also be this executor. Between chains only `chainId` changes in the domain. The other value to recompute per chain is the raw price, which depends on that chain's token decimals.
 
