@@ -41,9 +41,9 @@ Same addresses on Base (8453), BNB Smart Chain (56) and Base Sepolia (84532):
 
 | Contract | Address |
 |---|---|
-| `PropAMMExecutor` | `0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26` |
-| `PropAMMVenue` | `0x000000Da21a0f02b2626874870b6447Db220C1EF` |
-| `PropAMMHostedSettlement` | `0x0000002E6a90921B97A933deA6600f5e534f56b8` |
+| `PropAMMExecutor` | `0x000000fC9858a020bCE252cE21C6D539388dcD88` |
+| `PropAMMVenue` | `0x0000005880209CB9387C5904237ECeF97158DB69` |
+| `PropAMMHostedSettlement` | `0x000000dC71C3A53B1c587F122c2f9F8F73ce008C` |
 
 ## Docs
 

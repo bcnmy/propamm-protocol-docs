@@ -24,7 +24,7 @@ import WebSocket from "ws";
 // ---------------------------------------------------------------- config
 const ENDPOINT = "wss://propamm-staging.biconomy.io/v1/ws"; // Base Sepolia; production: wss://propamm.biconomy.io/v1/ws
 const CHAIN_ID = 84532; // Base Sepolia
-const EXECUTOR = "0x000000d4d7CB15E0FA9aB2B1fd49ca8537CDCA26"; // same address on every chain
+const EXECUTOR = "0x000000fC9858a020bCE252cE21C6D539388dcD88"; // same address on every chain
 const TOKEN_X = "0x8b414aD7005EeFd315aF2A16538885Eae229bab7"; // MockWETH, 18 decimals
 const TOKEN_Y = "0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df"; // MockUSDC, 18 decimals
 const PROVIDER = "0xYourInventoryContract"; // where fills pull your inventory
@@ -96,6 +96,7 @@ const LADDER_TYPES = {
     { name: "tokenOut", type: "address" },
     { name: "levels", type: "Level[]" },
     { name: "nonce", type: "uint256" },
+    { name: "timestampMs", type: "uint256" },
     { name: "expiresAt", type: "uint256" },
   ],
   Level: [
@@ -107,11 +108,12 @@ const LADDER_TYPES = {
 let nonce = BigInt(Date.now()); // any strictly increasing sequence works; the depth nonce fits uint128
 
 async function sendLadder(ws: WebSocket, tokenIn: string, tokenOut: string): Promise<void> {
+  const timestampMs = BigInt(Date.now()); // when you priced it: the origin any widening ages from
   const levels = await curveToLadder(tokenIn, tokenOut, CAP_X);
   if (levels.length === 0) return; // nothing servable right now: publish nothing
   nonce += 1n;
   const expiresAt = BigInt(Math.floor(Date.now() / 1000) + TTL_SECONDS);
-  const message = { mm: account.address, provider: PROVIDER, tokenIn, tokenOut, levels, nonce, expiresAt } as const;
+  const message = { mm: account.address, provider: PROVIDER, tokenIn, tokenOut, levels, nonce, timestampMs, expiresAt } as const;
   const signature = await account.signTypedData({
     domain: EIP712_DOMAIN,
     types: LADDER_TYPES,
@@ -125,6 +127,7 @@ async function sendLadder(ws: WebSocket, tokenIn: string, tokenOut: string): Pro
         ...message,
         levels: levels.map((l) => ({ size: l.size.toString(), price: l.price.toString() })),
         nonce: nonce.toString(),
+        timestampMs: timestampMs.toString(),
         expiresAt: expiresAt.toString(),
         signature,
         chainId: CHAIN_ID,
