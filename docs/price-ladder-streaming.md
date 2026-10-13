@@ -15,14 +15,14 @@ A price ladder and an offset ladder are both depth versions of the board and sha
 
 ## What you sign
 
-Every message is signed against the executor's EIP-712 domain. The executor address is the same on Base, BNB Smart Chain and Base Sepolia, so only `chainId` changes between chains.
+Every message is signed against the executor's EIP-712 domain. The executor address is the same on Base and Base Sepolia, so only `chainId` changes between chains.
 
 | Field | Value |
 |---|---|
 | `name` | `PropAMMExecutor` |
 | `version` | `2` |
 | `chainId` | the chain the board lives on |
-| `verifyingContract` | `0x000000fC9858a020bCE252cE21C6D539388dcD88` |
+| `verifyingContract` | `0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC` |
 
 The digest your key signs is `keccak256(0x1901 || domainSeparator || structHash)`. `executor.DOMAIN_SEPARATOR()` returns the separator, and the executor exposes the exact digests (`ladderDigest`, `offsetLadderDigest`, `anchorBatchDigest`, `controlsDigest`) and struct hashes (`hashLadder`, `hashOffsetLadder`, `hashAnchorEntry`, `hashAnchorBatch`, `hashControls`) as views, so you can check a signer implementation against the contract without a transaction. Signatures are checked as ECDSA first (65 bytes, or 64 in EIP-2098 form, recovering `mm`), then, when `mm` has code, through EIP-1271 `isValidSignature` under a fixed budget of 150,000 gas. A contract signer whose check needs more gas than that is rejected; a check that runs out skips only that message, never the rest of the batch.
 
@@ -143,7 +143,7 @@ The stream rejects a message that fails any of these, and the executor skips one
 | Rule | Applies to |
 |---|---|
 | `tokenIn != 0`, `tokenOut != 0`, `tokenIn != tokenOut`, `provider != 0` | ladders |
-| `nonce` fits `uint128`, `expiresAt` fits `uint40` | ladders |
+| `nonce` fits `uint48`, `expiresAt` fits `uint40` | ladders |
 | `expiresAt` in the future at commit time | ladders |
 | `timestampMs` above zero, at most 30 seconds ahead of the block and not after `expiresAt` | price ladders |
 | 1 to 20 levels or rungs | ladders |
@@ -169,14 +169,14 @@ The stream rejects a message that fails any of these, and the executor skips one
 
 | Nonce | Scope | Rule |
 |---|---|---|
-| depth nonce (`PriceLadder.nonce`, `OffsetLadder.nonce`) | one per board `(mm, tokenIn, tokenOut)`, shared by both ladder forms | strictly greater than the board's stored depth nonce to be applied; fits `uint128` |
+| depth nonce (`PriceLadder.nonce`, `OffsetLadder.nonce`) | one per board `(mm, tokenIn, tokenOut)`, shared by both ladder forms | strictly greater than the board's stored depth nonce to be applied; fits `uint48` |
 | anchor timestamp (`AnchorEntry.timestampMs`) | one per pair, whichever direction an entry is signed for | strictly greater than the pair's stored `timestampMs` to be applied; fits `uint48`; `board()` reports it as `anchorNonce` |
 | controls nonce (`BoardControls.nonce`) | one per board, independent of both | strictly greater than the stored controls nonce to be applied; fits `uint48` |
 
 - A message whose nonce is not fresher than the stored one is a silent no-op onchain, skipped before validation and before the signature is checked. The stream rejects it with `STALE_NONCE`. An anchor batch is checked per entry: stale entries are skipped, the rest apply, and the stream answers `STALE_NONCE` only when every entry is stale. Re-submitting an already committed message is therefore harmless and two committers racing never fail each other's transactions.
 - The rule holds after expiry too: an older nonce never comes back. To restore a quote, sign it again with a fresh nonce.
 - Never re-sign the same nonce to refresh a quote; it will be skipped. Sign a fresh nonce or rely on the TTL.
-- Any strictly increasing sequence works for the depth and controls nonces. Millisecond timestamps fit both limits (the `uint48` limit holds millisecond timestamps for thousands of years); a per-board counter works as well. The nonces do not need to be related. Nonce spaces are per board, so the same value may be reused across pairs and directions in one tick.
+- Any strictly increasing sequence works for the depth and controls nonces. Millisecond timestamps fit both limits (the `uint48` limit holds millisecond timestamps for thousands of years); microsecond and nanosecond timestamps do not. A per-board counter works as well. The nonces do not need to be related. Nonce spaces are per board, so the same value may be reused across pairs and directions in one tick.
 - An anchor's `timestampMs` is both the time you priced it and its ordering key, so it must be a real unix millisecond timestamp: drift and age-based widening count from it, and its expiry is `timestampMs / 1000 + ttl`. Two anchors for the same pair in the same millisecond need distinct values; add one to the later.
 - A price ladder's `timestampMs` is the origin its widening counts from, so set it to the time you priced the ladder, not the time you signed or sent it: a ladder committed late still ages from when you priced it. It is not an ordering key; the depth nonce orders ladders.
 - A depth commit resets the meter to zero. Re-sign the offset ladder only when the shape or the provider changes or when consumed depth should re-open; move the price with anchors.
@@ -406,7 +406,7 @@ The server answers `{ "type": "ack" }`. It may also send informational frames of
 | `levels[].price` | uint128 as string | 1e18-scaled tokenOut per tokenIn, non-increasing with depth |
 | `rungs[].offsetPpm` | string | Discount below the anchor in ppm, non-decreasing with depth, below 1e6 |
 | `driftPpmPerSecond` | uint32 as string | Offset widening per second of anchor age; `"0"` disables drift |
-| `nonce` | string | Depth nonce (uint128) for ladders, controls nonce (uint48) for controls; strictly increasing per board |
+| `nonce` | string | Depth nonce (uint48) for ladders, controls nonce (uint48) for controls; strictly increasing per board |
 | `timestampMs` | unix milliseconds as string | Price ladders only. When the maker priced the ladder; the origin its widening ages from. Above zero, at most 30 seconds ahead, not after `expiresAt` |
 | `expiresAt` | unix seconds as string | Ladders and controls. uint40; at most one hour ahead. On a ladder the TTL of the board; on controls the last second the message can be committed |
 | `entries` | array | Anchors only. 1 to 32 entries, at most one per pair |

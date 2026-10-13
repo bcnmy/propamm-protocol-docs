@@ -8,17 +8,17 @@ You need Foundry (`forge`, `cast`), Node 20 or later, a Base Sepolia RPC URL, a 
 
 | What | Address |
 |---|---|
-| `PropAMMExecutor` (sign against this; set it as `approvedExecutor`) | `0x000000fC9858a020bCE252cE21C6D539388dcD88` |
-| `PropAMMVenue` (routers read and fill your board here) | `0x0000005880209CB9387C5904237ECeF97158DB69` |
+| `PropAMMExecutor` (sign against this; set it as `approvedExecutor`) | `0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC` |
+| `PropAMMVenue` (routers read and fill your board here) | `0x0000009E5F98cDB4dd1E1d2E15B220217c88B3b8` |
 | MockWETH (18 decimals, mintable) | `0x8b414aD7005EeFd315aF2A16538885Eae229bab7` |
 | MockUSDC (18 decimals, mintable) | `0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df` |
 
-Base (8453) and BNB Smart Chain (56) use the same executor and venue addresses. The executor is the EIP-712 `verifyingContract`; between chains only `chainId` changes.
+Base (8453) uses the same executor and venue addresses. The executor is the EIP-712 `verifyingContract`; between chains only `chainId` changes.
 
 ```bash
 export RPC_URL=<your Base Sepolia RPC>
-export EXECUTOR=0x000000fC9858a020bCE252cE21C6D539388dcD88
-export VENUE=0x0000005880209CB9387C5904237ECeF97158DB69
+export EXECUTOR=0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC
+export VENUE=0x0000009E5F98cDB4dd1E1d2E15B220217c88B3b8
 export WETH=0x8b414aD7005EeFd315aF2A16538885Eae229bab7
 export USDC=0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df
 export SIGNER=<address of your signing key>

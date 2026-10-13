@@ -37,12 +37,12 @@ Two lanes fill through that door:
 
 ## Addresses
 
-Same addresses on Base (8453), BNB Smart Chain (56) and Base Sepolia (84532):
+Same addresses on Base (8453) and Base Sepolia (84532):
 
 | Contract | Address |
 |---|---|
-| `PropAMMExecutor` | `0x000000fC9858a020bCE252cE21C6D539388dcD88` |
-| `PropAMMVenue` | `0x0000005880209CB9387C5904237ECeF97158DB69` |
+| `PropAMMExecutor` | `0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC` |
+| `PropAMMVenue` | `0x0000009E5F98cDB4dd1E1d2E15B220217c88B3b8` |
 | `PropAMMHostedSettlement` | `0x000000dC71C3A53B1c587F122c2f9F8F73ce008C` |
 
 ## Docs
