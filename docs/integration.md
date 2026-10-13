@@ -97,7 +97,7 @@ Nothing onchain is required of you beyond the provider. The hosted lane routes t
 | Environment | WebSocket | Chains |
 |---|---|---|
 | Staging | `wss://propamm-staging.biconomy.io/v1/ws` | Base Sepolia (84532), mintable test tokens |
-| Production | `wss://propamm.biconomy.io/v1/ws` | Base (8453) and BNB Smart Chain (56) |
+| Production | `wss://propamm.biconomy.io/v1/ws` | Base (8453) |
 
 Same protocol and message shapes on both. A client validated against staging moves to production by changing the endpoint, `chainId` and the token addresses.
 
@@ -123,7 +123,7 @@ import { privateKeyToAccount } from "viem/accounts";
 
 const ENDPOINT = "wss://propamm-staging.biconomy.io/v1/ws";
 const CHAIN_ID = 84532;
-const EXECUTOR = "0x000000fC9858a020bCE252cE21C6D539388dcD88"; // same address on every chain
+const EXECUTOR = "0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC"; // same address on every chain
 const PROVIDER = "0xYourProviderContract";
 const TOKEN_IN = "0x8b414aD7005EeFd315aF2A16538885Eae229bab7";  // MockWETH, 18 decimals
 const TOKEN_OUT = "0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df"; // MockUSDC, 18 decimals
@@ -331,12 +331,12 @@ To resume after a stop, stream fresh messages with fresher nonces; an older nonc
 
 The executor is the address that matters to you: your messages are signed against it and it is the only address your provider trusts. The venue is where routers read and fill your board.
 
-Same addresses on Base (8453), BNB Smart Chain (56) and Base Sepolia (84532):
+Same addresses on Base (8453) and Base Sepolia (84532):
 
 | Contract | Address |
 |---|---|
-| `PropAMMExecutor` | `0x000000fC9858a020bCE252cE21C6D539388dcD88` |
-| `PropAMMVenue` | `0x0000005880209CB9387C5904237ECeF97158DB69` |
+| `PropAMMExecutor` | `0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC` |
+| `PropAMMVenue` | `0x0000009E5F98cDB4dd1E1d2E15B220217c88B3b8` |
 | `PropAMMHostedSettlement` | `0x000000dC71C3A53B1c587F122c2f9F8F73ce008C` |
 
 The executor address is the EIP-712 `verifyingContract`, so a board signed for an earlier executor does not verify against this one; your provider's `approvedExecutor` must also be this executor. Between chains only `chainId` changes in the domain. The other value to recompute per chain is the raw price, which depends on that chain's token decimals.
