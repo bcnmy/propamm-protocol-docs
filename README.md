@@ -52,6 +52,7 @@ Same addresses on Base (8453) and Base Sepolia (84532):
 - [docs/integration.md](docs/integration.md): maker onboarding. The provider contract, the signing key, the stream, risk controls, provider-side pricing on the hosted lane, inventory sizing, going dark.
 - [docs/maker-quickstart-base-weth-usdc.md](docs/maker-quickstart-base-weth-usdc.md): the shortest path on Base Sepolia. Deploy `BasicMMProvider`, fund it, connect, stream, set your risk limits, verify with `board()`.
 - [docs/aggregator-api.md](docs/aggregator-api.md): the venue surface, the read pattern for trackers, the swap recipe, fees, the `Swapped` and `PropAMMSwap` events.
+- [docs/venue-board-feed.md](docs/venue-board-feed.md): every maker's board per block over a WebSocket, including boards signed but not yet onchain.
 - [docs/examples/](docs/examples/): `IMMProvider.sol`, `BasicMMProvider.sol`, `RouterVaultProvider.sol` (for makers who keep inventory in their own vault) and a reference client that samples a pricing curve into a price ladder.
 
 ## Related
