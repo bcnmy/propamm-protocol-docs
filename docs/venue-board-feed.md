@@ -60,6 +60,7 @@ An example, with one of the boards on Base at block 52847598:
   "executor": "0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC",
   "blockNumber": "52847598",
   "timestamp": "1792484543",
+  "nextTimestamp": "1792484545",
   "feeBps": 0,
   "makers": ["0x960f1e3181E928210C02a34EE29bf3d354dD2FF5", "0x72A2df03AeeF2A8343f9Fb86bd65193A3008890C"],
   "boards": [
@@ -88,7 +89,8 @@ Here WETH has 18 decimals and USDC 6, so `2385958388` is 2,385.958388 USDC per W
 
 | Field | Meaning |
 |---|---|
-| `blockNumber`, `timestamp` | the block every committed board was read at, and its timestamp in unix seconds; pending boards are priced at the same timestamp |
+| `blockNumber`, `timestamp` | the block every committed board was read at, and its timestamp in unix seconds; committed boards are priced for it |
+| `nextTimestamp` | the next block's timestamp, from the last two blocks' spacing; pending boards are priced for it, since that is the earliest block they land in |
 | `feeBps` | the venue's protocol fee: `out - out * feeBps / 10000` on the merged output |
 | `makers` | registered makers in registry order; the venue breaks price ties in this order |
 | `builtAtMs` | when the message was built, unix milliseconds; use it to detect a stale feed |
@@ -139,7 +141,7 @@ If a commit fails, the pending board disappears from the next message and the co
 
 ## Time
 
-Prices are for `timestamp`, and they move between blocks without a new board:
+Committed prices are for `timestamp` and pending prices for `nextTimestamp`. Prices move between blocks without a new board:
 
 - an `offsets` board's price falls as its anchor ages;
 - a board with widening falls with the square root of its age;
