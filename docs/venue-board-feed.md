@@ -9,25 +9,6 @@ The board feed sends every maker's board on each block, the same boards `board()
 
 Send your API key in the `x-api-key` header, on the WebSocket connection request and on REST. Ask us for a key.
 
-## How it works
-
-```mermaid
-sequenceDiagram
-    participant M as Maker
-    participant B as Biconomy
-    participant C as Chain
-    participant A as You
-    M->>B: signs a new board
-    B-->>A: boards: committed board + pending board
-    B->>C: commits the new board
-    C-->>B: next block
-    B-->>A: boards: the new board, committed
-```
-
-- On every new block you get a message with every maker's boards at that block.
-- When a maker signs a new board, you get a message at once, with the new board marked `committed: false`.
-- Every message is a full snapshot of the venue. There is nothing to merge, and a missed message is repaired by the next one.
-
 ## Stream
 
 Connect, then subscribe to a chain:
