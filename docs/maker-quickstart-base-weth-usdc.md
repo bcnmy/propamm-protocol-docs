@@ -4,12 +4,14 @@ The shortest path from nothing to a live board on Base Sepolia: deploy `BasicMMP
 
 You need Foundry (`forge`, `cast`), Node 20 or later, a Base Sepolia RPC URL, a funded deployer key for one transaction, and a signing key for your stream. The two keys can be the same during testing.
 
+Already quoting on the previous generation? The steps are the same with a new provider; what changes is in [integration.md, section 9](integration.md#9-migrating-from-the-previous-generation).
+
 ## Addresses
 
 | What | Address |
 |---|---|
-| `PropAMMExecutor` (sign against this; set it as `approvedExecutor`) | `0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC` |
-| `PropAMMVenue` (routers read and fill your board here) | `0x0000009E5F98cDB4dd1E1d2E15B220217c88B3b8` |
+| `PropAMMExecutor` (sign against this; set it as `approvedExecutor`) | `{{EXECUTOR}}` |
+| `PropAMMVenue` (routers read and fill your board here) | `{{VENUE}}` |
 | MockWETH (18 decimals, mintable) | `0x8b414aD7005EeFd315aF2A16538885Eae229bab7` |
 | MockUSDC (18 decimals, mintable) | `0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df` |
 
@@ -17,8 +19,8 @@ Base (8453) uses the same executor and venue addresses. The executor is the EIP-
 
 ```bash
 export RPC_URL=<your Base Sepolia RPC>
-export EXECUTOR=0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC
-export VENUE=0x0000009E5F98cDB4dd1E1d2E15B220217c88B3b8
+export EXECUTOR={{EXECUTOR}}
+export VENUE={{VENUE}}
 export WETH=0x8b414aD7005EeFd315aF2A16538885Eae229bab7
 export USDC=0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df
 export SIGNER=<address of your signing key>
@@ -79,7 +81,7 @@ Connect to `wss://propamm-staging.biconomy.io/v1/ws` with your API key in the `x
 }
 ```
 
-**An anchor loop.** Sign one `OffsetLadder` per direction (sizes, offsets in ppm below the anchor, optional drift, a TTL of up to an hour), then every second one `AnchorBatch` with an entry for the pair: the reference price for one direction (the reverse prices at `1e36 / price`), a `timestampMs` and a `ttl` of about 15 seconds. The runnable client in [integration.md, section 4](integration.md#4-the-stream) does exactly this against the addresses above; set `MM_SIGNER_KEY` and `PROVIDER` and run it.
+**An anchor loop.** Sign one `OffsetLadder` per direction (sizes, offsets in ppm below the anchor, optional drift per block, a TTL of up to an hour), then every second one `AnchorBatch` with an entry for the pair: the reference price for one direction (the reverse prices at `1e36 / price`), a `timestampMs` and a `ttl` of about 15 seconds. The runnable client in [integration.md, section 4](integration.md#4-the-stream) does exactly this against the addresses above; set `MM_SIGNER_KEY` and `PROVIDER` and run it.
 
 Every accepted message is answered with `{ "type": "ack" }`. An `error` frame names the reason; the code table is in [integration.md](integration.md#error-codes).
 
@@ -96,7 +98,7 @@ One more signed message bounds what a board costs you between ticks. It is optio
     "tokenOut": "0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df",
     "nonce": "<unix milliseconds>",
     "blockCap": "5000000000000000000",
-    "widenPpmPerSqrtSecond": "100",
+    "widenPpmPerSqrtBlock": "100",
     "premiumPpm": "500",
     "premiumBlocks": "1",
     "expiresAt": "<unix seconds, now + 300>",
@@ -106,14 +108,14 @@ One more signed message bounds what a board costs you between ticks. It is optio
 }
 ```
 
-That is at most 5 MockWETH from this board in any one block, a price that widens 100 ppm after one second of quote age and 200 ppm after four, and 5 bps extra in the block where you move your price. Read it back, together with what the current block has already filled:
+That is at most 5 MockWETH from this board in any one block, a price that widens 100 ppm after one block of quote age and 200 ppm after four, and 5 bps extra in the block where you move your price. Without this message the per-block bound is the board's top size. Read it back, together with what the current block has already filled:
 
 ```bash
 cast call $EXECUTOR "controls(address,address,address)(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256)" \
   $SIGNER $WETH $USDC --rpc-url $RPC_URL
 ```
 
-The returns are `blockCap`, `widenPpmPerSqrtSecond`, `premiumPpm`, `premiumBlocks`, the controls nonce, `filledThisBlock`, the block the premium window runs from and, on a price board, its age origin in unix seconds. Field semantics and how to choose the numbers are in [integration.md](integration.md#risk-controls).
+The returns are `blockCap`, `widenPpmPerSqrtBlock`, `premiumPpm`, `premiumBlocks`, the controls nonce, `filledThisBlock`, the block of the latest depth or controls commit and the block of the latest depth commit. Field semantics and how to choose the numbers are in [integration.md](integration.md#risk-controls).
 
 ## Step 6: verify with `board()`
 

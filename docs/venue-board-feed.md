@@ -31,14 +31,14 @@ Errors arrive as `{"type":"error","code":"...","message":"..."}`, with `code` on
 
 ## Message
 
-An example, with one of the boards on Base at block 52847598:
+An example message on Base, with one board shown:
 
 ```json
 {
   "type": "boards",
   "chainId": 8453,
-  "venue": "0x0000009E5F98cDB4dd1E1d2E15B220217c88B3b8",
-  "executor": "0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC",
+  "venue": "{{VENUE}}",
+  "executor": "{{EXECUTOR}}",
   "blockNumber": "52847598",
   "timestamp": "1792484543",
   "nextTimestamp": "1792484545",
@@ -124,8 +124,8 @@ If a commit fails, the pending board disappears from the next message and the co
 
 Committed prices are for `timestamp` and pending prices for `nextTimestamp`. Prices move between blocks without a new board:
 
-- an `offsets` board's price falls as its anchor ages;
-- a board with widening falls with the square root of its age;
+- an `offsets` board's price falls with each block its anchor ages (drift counts blocks since the anchor's commit);
+- a board with widening falls with the square root of its age in blocks;
 - a board with a premium is priced lower for a few blocks after each commit, then rises when the premium ends.
 
 Use the newest message and treat one whose `builtAtMs` is more than a few seconds old as stale. To execute, call the venue as in [aggregator-api.md](aggregator-api.md); the feed only replaces the reads.

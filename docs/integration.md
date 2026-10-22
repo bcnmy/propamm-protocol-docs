@@ -15,6 +15,7 @@ What a market maker runs to quote on PropAMM: a provider contract that holds inv
    - [Tracking your inventory](#tracking-your-inventory)
 7. [Going dark](#7-going-dark)
 8. [Addresses](#8-addresses)
+9. [Migrating from the previous generation](#9-migrating-from-the-previous-generation)
 
 ## 1. The provider contract
 
@@ -82,7 +83,7 @@ Use an owner multisig in production.
 
 ## 2. The signing key
 
-The key that signs your boards is `mm` in every message: the board key onchain, the address the venue registers, and the value your provider's `signer()` must return. An EOA works with a 65-byte ECDSA signature; a contract works through EIP-1271. The executor tries ECDSA first and gives an EIP-1271 check a fixed budget of 150,000 gas; a contract signer that needs more is rejected. One key can sign for many pairs, directions and chains. The EIP-712 domain is the executor's (`PropAMMExecutor`, version `2`, the chain id, the executor address), and the executor address is the same on every chain, so a signer validated on Base Sepolia moves to another chain by changing `chainId`.
+The key that signs your boards is `mm` in every message: the board key onchain, the address the venue registers, and the value your provider's `signer()` must return. An EOA works with a 65-byte ECDSA signature; a contract works through EIP-1271. The executor tries ECDSA first and gives an EIP-1271 check a fixed budget of 150,000 gas; a contract signer that needs more is rejected. One key can sign for many pairs, directions and chains. The EIP-712 domain is the executor's (`PropAMMExecutor`, version `1`, the chain id, the executor address), and the executor address is the same on every chain, so a signer validated on Base Sepolia moves to another chain by changing `chainId`.
 
 Signatures are standard EIP-712 (`signTypedData` in viem or ethers); the types object and struct layouts are in [price-ladder-streaming.md](price-ladder-streaming.md).
 
@@ -123,20 +124,20 @@ import { privateKeyToAccount } from "viem/accounts";
 
 const ENDPOINT = "wss://propamm-staging.biconomy.io/v1/ws";
 const CHAIN_ID = 84532;
-const EXECUTOR = "0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC"; // same address on every chain
+const EXECUTOR = "{{EXECUTOR}}"; // same address on every chain
 const PROVIDER = "0xYourProviderContract";
 const TOKEN_IN = "0x8b414aD7005EeFd315aF2A16538885Eae229bab7";  // MockWETH, 18 decimals
 const TOKEN_OUT = "0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df"; // MockUSDC, 18 decimals
 
 const account = privateKeyToAccount(process.env.MM_SIGNER_KEY as `0x${string}`);
-const domain = { name: "PropAMMExecutor", version: "2", chainId: CHAIN_ID, verifyingContract: EXECUTOR } as const;
+const domain = { name: "PropAMMExecutor", version: "1", chainId: CHAIN_ID, verifyingContract: EXECUTOR } as const;
 const types = {
   Rung: [{ name: "size", type: "uint256" }, { name: "offsetPpm", type: "uint256" }],
   OffsetLadder: [
     { name: "mm", type: "address" }, { name: "provider", type: "address" },
     { name: "tokenIn", type: "address" }, { name: "tokenOut", type: "address" },
     { name: "rungs", type: "Rung[]" }, { name: "nonce", type: "uint256" },
-    { name: "expiresAt", type: "uint256" }, { name: "driftPpmPerSecond", type: "uint256" },
+    { name: "expiresAt", type: "uint256" }, { name: "driftPpmPerBlock", type: "uint256" },
   ],
   AnchorEntry: [
     { name: "tokenIn", type: "address" }, { name: "tokenOut", type: "address" },
@@ -164,7 +165,7 @@ async function sendOffsets(ws: WebSocket) {
     ],
     nonce: BigInt(Date.now()),          // depth nonce; shared with price ladders for this board
     expiresAt: now() + 1800n,           // the schedule lives 30 minutes
-    driftPpmPerSecond: 10n,             // widen 1 bp per second of anchor age
+    driftPpmPerBlock: 10n,              // widen 10 ppm per block since the anchor's commit
   };
   const signature = await account.signTypedData({ domain, types, primaryType: "OffsetLadder", message });
   ws.send(frame({ type: "offsets", payload: { ...message, signature, chainId: CHAIN_ID } }));
@@ -179,7 +180,7 @@ async function sendAnchors(ws: WebSocket) {
     {
       tokenIn: TOKEN_IN, tokenOut: TOKEN_OUT,
       price: yourPrice(),               // TOKEN_IN to TOKEN_OUT; the reverse prices at 1e36 / price
-      timestampMs: lastTimestampMs,     // when this price was produced; the drift origin and ordering key
+      timestampMs: lastTimestampMs,     // when this price was produced; the ordering key and the start of ttl
       ttl: 15n,                         // dark 15 seconds after timestampMs if no fresher anchor lands
       skewPpm: 0n,                      // extra discount on TOKEN_IN to TOKEN_OUT
       reverseSkewPpm: 0n,               // extra discount on TOKEN_OUT to TOKEN_IN
@@ -209,15 +210,15 @@ Between two of your ticks the board is a firm quote that anyone may take. Three 
 
 | Control | What it does | A reasonable starting point |
 |---|---|---|
-| `blockCap` | Bounds the tokenIn any single block may fill from the board, counting every caller and both lanes | A fraction of your top size, sized to one block of adverse flow you accept |
-| `widenPpmPerSqrtSecond` | Adds `ceil(sqrt(widenPpmPerSqrtSecond^2 * age))` ppm of discount, where `age` is the quote's age in seconds | 50 to 200 ppm, depending on how fast the pair moves |
+| `blockCap` | Bounds the tokenIn any single block may fill from the board, counting every caller, both lanes and every depth version. Unsigned (`0`), the bound is the current version's top size | A fraction of your top size, sized to one block of adverse flow you accept |
+| `widenPpmPerSqrtBlock` | Adds `ceil(sqrt(widenPpmPerSqrtBlock^2 * age))` ppm of discount, where `age` is the quote's age in blocks | 50 to 200 ppm per square root of a second, depending on how fast the pair moves, converted to the block time ([conversion](price-ladder-streaming.md#per-block-values-and-block-time)) |
 | `premiumPpm` with `premiumBlocks` | Adds `premiumPpm` of discount for that many blocks after you commit depth, an anchor or the controls, counting the commit block as the first | A few hundred ppm for 1 or 2 blocks. If you anchor every block or flashblock, the premium applies almost continuously: size it for that or keep it at 0 and rely on widening |
 
 ```ts
 const CONTROLS = [
   { name: "mm", type: "address" }, { name: "tokenIn", type: "address" },
   { name: "tokenOut", type: "address" }, { name: "nonce", type: "uint256" },
-  { name: "blockCap", type: "uint256" }, { name: "widenPpmPerSqrtSecond", type: "uint256" },
+  { name: "blockCap", type: "uint256" }, { name: "widenPpmPerSqrtBlock", type: "uint256" },
   { name: "premiumPpm", type: "uint256" }, { name: "premiumBlocks", type: "uint256" },
   { name: "expiresAt", type: "uint256" },
 ] as const;
@@ -227,7 +228,7 @@ async function sendControls(ws: WebSocket) {
     mm: account.address, tokenIn: TOKEN_IN, tokenOut: TOKEN_OUT,
     nonce: BigInt(Date.now()),           // controls nonce, its own sequence
     blockCap: 5n * 10n ** 18n,           // at most 5 tokenIn from this board in any one block
-    widenPpmPerSqrtSecond: 100n,         // 100 ppm after 1 s, 200 after 4 s, 500 after 25 s
+    widenPpmPerSqrtBlock: 100n,          // 100 ppm after 1 block, 200 after 4, 500 after 25
     premiumPpm: 500n,                    // 5 bps extra
     premiumBlocks: 1n,                   // for the block in which the price moves
     expiresAt: now() + 300n,             // commit deadline, not a lifetime; committed controls hold until replaced
@@ -256,7 +257,7 @@ Full field semantics, validation rules and the wire frame are in [price-ladder-s
 | `UPDATE_EXPIRED` | `expiresAt` (on a ladder or on controls), or an anchor entry's `timestampMs / 1000 + ttl`, already in the past | clock skew or TTL too short |
 | `INVALID_TOKEN_PAIR` | `tokenIn` equals `tokenOut` | fix the pair |
 | `UNREGISTERED_MARKET_MAKER` | signer not registered | complete registration |
-| `INVALID_SIGNATURE` | recovered signer does not match `mm` | check the domain: version `2`, executor address, `chainId`, and the types object |
+| `INVALID_SIGNATURE` | recovered signer does not match `mm` | check the domain: version `1`, executor address, `chainId`, and the types object |
 | `UNSUPPORTED_PAIR` | pair or direction not registered for you on that chain; for an anchor message, any entry whose pair is not registered in either direction refuses the whole message | register it, check addresses and `chainId` |
 | `PROVIDER_MISMATCH` | signed `provider` differs from the one registered for the pair | sign the registered provider or update the registration |
 | `STALE_NONCE` | nonce at or below the last accepted one for this board; the depth and controls sequences are counted separately; an anchor message is stale only when every entry is at or below its pair's last `timestampMs` | keep nonces and anchor timestamps strictly increasing; unix milliseconds work |
@@ -293,7 +294,7 @@ On the onchain lane the venue quotes from the board, not from `previewSwap`. A p
 - Inventory is `tokenOut` per direction. A WETH to USDC board pays from your USDC; the incoming WETH lands in your provider and funds the reverse direction if you quote it.
 - The top size of a depth version is your exposure cap for that version: across every route, lane and retry, one version never fills more than its top size, and the most `tokenOut` it can pay is the sum over its levels of `(size_i - size_{i-1}) * price_i / 1e18`. Holding less is safe: the executor caps each board at what `available` reports, so a short provider shows less depth instead of failing fills. If `executeSwap` still cannot pay, the fill reverts and nothing is lost.
 - Both lanes draw on one meter. A hosted fill and a venue fill of the same version consume the same depth.
-- On price ladders every commit re-opens the full top size. On offset boards depth re-opens only when you re-sign the offset ladder, so the top size is exposure per offset-ladder version, however many anchors you push. One anchor entry re-prices both directions of a pair, and each direction keeps its own meter.
+- On price ladders every commit re-opens the full top size, from the next block: within one block every version shares one per-block budget (your `blockCap`, or the current version's top size when you sign none). On offset boards depth re-opens only when you re-sign the offset ladder, so the top size is exposure per offset-ladder version, however many anchors you push. One anchor entry re-prices both directions of a pair, and each direction keeps its own meter.
 - A fill whose output floors to zero is refused by the executor, and the venue never allocates such a size; there is no dust drain.
 - A block cap does not reduce your depth. It bounds the rate at which a version can be consumed, not the total: an order larger than the cap fills up to the cap this block and the rest of the board is still there in the next one.
 
@@ -335,9 +336,9 @@ Same addresses on Base (8453) and Base Sepolia (84532):
 
 | Contract | Address |
 |---|---|
-| `PropAMMExecutor` | `0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC` |
-| `PropAMMVenue` | `0x0000009E5F98cDB4dd1E1d2E15B220217c88B3b8` |
-| `PropAMMHostedSettlement` | `0x000000dC71C3A53B1c587F122c2f9F8F73ce008C` |
+| `PropAMMExecutor` | `{{EXECUTOR}}` |
+| `PropAMMVenue` | `{{VENUE}}` |
+| `PropAMMHostedSettlement` | `{{HOSTED_SETTLEMENT}}` |
 
 The executor address is the EIP-712 `verifyingContract`, so a board signed for an earlier executor does not verify against this one; your provider's `approvedExecutor` must also be this executor. Between chains only `chainId` changes in the domain. The other value to recompute per chain is the raw price, which depends on that chain's token decimals.
 
@@ -348,3 +349,27 @@ Base Sepolia test tokens, mintable by anyone through `mint(address,uint256)`:
 | MockWETH | `0x8b414aD7005EeFd315aF2A16538885Eae229bab7` | 18 |
 | MockUSDC | `0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df` | 18 |
 | MockDAI | `0xa3Db3e064D74fF11e6E07b9869a67f1E4FCFEcFb` | 18 |
+
+## 9. Migrating from the previous generation
+
+This generation runs at new addresses under a new EIP-712 domain, so a message signed for the previous executor does not verify here: re-sign everything. `PriceLadder` and `AnchorBatch` keep their structs and typehashes; `OffsetLadder` and `BoardControls` rename one field each.
+
+| What | Previous generation | This generation |
+|---|---|---|
+| Domain `version` | `2` | `1` |
+| Domain `verifyingContract` | the previous executor | `{{EXECUTOR}}` |
+| `OffsetLadder` drift field | `driftPpmPerSecond`, per second since the anchor's `timestampMs` | `driftPpmPerBlock`, per block since the anchor's commit block |
+| `OffsetLadder` typehash | `0x6e7487dfe773740547925ab1bad36e1cde1df70b26caa643fe2a2c4ade83ee25` | `0x7b0c7919579b71d01b4608b2f3e196bbcb9a822f3308bbb01d1d4b30b7bebbe4` |
+| `BoardControls` widening field | `widenPpmPerSqrtSecond`, age in seconds | `widenPpmPerSqrtBlock`, age in blocks from the anchor's commit (offset board) or the depth commit (price board) |
+| `BoardControls` typehash | `0x4605634bd4ada105179d6a1108966e8f29237828fb904fe7750508a74d2b692b` | `0xf6c5eb3ee653fbcf3747f5f7a1788b589aca8cd98e65968f01120e57ada581f2` |
+| Price ladder widening origin | its signed `timestampMs`, capped at the commit time | the block it is committed in |
+| `blockCap = 0` | no cap | the current version's top size per block, counted across every version committed in that block |
+| Executor's maximum anchor `ttl` | 16,000 s | 13,000 s |
+| `controls()` last return value | `committedAt`, unix seconds | `committedBlock`, a block number |
+
+1. **Deploy a provider for this executor.** A provider trusts one executor, its `approvedExecutor`. Deploy `BasicMMProvider(signer, {{EXECUTOR}}, owner)` and fund it ([section 1](#1-the-provider-contract)). With a vault, deploy `RouterVaultProvider(vault, signer, {{EXECUTOR}}, owner)`; its executor is fixed at deployment. The vault trusts one router, so pointing it at the new provider (`setRouter`, then `approve` per token) moves your allowance there and darkens the previous provider's boards in the same transaction. Do it when you switch.
+2. **Register the new provider** with the network for each pair. The stream refuses a ladder whose signed `provider` differs from the registered one (`PROVIDER_MISMATCH`).
+3. **Re-sign.** Set `version: "1"` and `verifyingContract` to `{{EXECUTOR}}`, rename the two fields in your `types` object and wire payloads, and name the new provider in every `PriceLadder` and `OffsetLadder`. A maker that streams price ladders only changes the domain and the provider.
+4. **Convert per-second values to per-block** for the chain's block time, and re-sign controls and offset ladders with a fresh nonce when Base moves to 200 ms blocks ([conversion](price-ladder-streaming.md#per-block-values-and-block-time)).
+5. **Choose `blockCap`.** Leave it at `0` for one top size per block, sign less to cap tighter, or sign more if you re-sign within a block and want the versions to add up.
+6. **Keep TTLs short if you use drift or widening.** Both start in the block a message lands in, and whoever holds a signed message picks that block within its TTL.

@@ -7,7 +7,7 @@ How a maker's prices reach the chain. You sign small EIP-712 messages that descr
 | Form | Messages | When to use |
 |---|---|---|
 | Price ladder | `PriceLadder`: cumulative sizes with absolute 1e18-scaled prices | Your engine emits absolute prices by size and you are willing to re-sign the whole ladder on every price change |
-| Offset ladder plus pair anchor | `OffsetLadder`: cumulative sizes with discounts below a reference price, plus a drift rate; `AnchorBatch`: the reference price of every pair you quote, one entry per pair, both directions of a pair from one entry, under one signature | Sizes and discounts change rarely, the price changes often. One anchor commit is one storage word per pair and never re-opens consumed depth |
+| Offset ladder plus pair anchor | `OffsetLadder`: cumulative sizes with discounts below a reference price, plus a drift rate per block; `AnchorBatch`: the reference price of every pair you quote, one entry per pair, both directions of a pair from one entry, under one signature | Sizes and discounts change rarely, the price changes often. One anchor commit is one storage word per pair and never re-opens consumed depth |
 
 Either form may carry a fourth message, `BoardControls`, the risk limits the executor applies to every fill of that board. It is optional, has its own nonce sequence, and outlives depth and anchor commits. See [board controls](#board-controls).
 
@@ -20,9 +20,11 @@ Every message is signed against the executor's EIP-712 domain. The executor addr
 | Field | Value |
 |---|---|
 | `name` | `PropAMMExecutor` |
-| `version` | `2` |
+| `version` | `1` |
 | `chainId` | the chain the board lives on |
-| `verifyingContract` | `0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC` |
+| `verifyingContract` | `{{EXECUTOR}}` |
+
+The previous generation's executor used `version` `2` and its own address, and two field names differ. If you signed for it, see [migrating from the previous generation](integration.md#9-migrating-from-the-previous-generation).
 
 The digest your key signs is `keccak256(0x1901 || domainSeparator || structHash)`. `executor.DOMAIN_SEPARATOR()` returns the separator, and the executor exposes the exact digests (`ladderDigest`, `offsetLadderDigest`, `anchorBatchDigest`, `controlsDigest`) and struct hashes (`hashLadder`, `hashOffsetLadder`, `hashAnchorEntry`, `hashAnchorBatch`, `hashControls`) as views, so you can check a signer implementation against the contract without a transaction. Signatures are checked as ECDSA first (65 bytes, or 64 in EIP-2098 form, recovering `mm`), then, when `mm` has code, through EIP-1271 `isValidSignature` under a fixed budget of 150,000 gas. A contract signer whose check needs more gas than that is rejected; a check that runs out skips only that message, never the rest of the batch.
 
@@ -41,7 +43,7 @@ struct PriceLadder {
     address tokenOut;  // pair token out
     Level[] levels;    // ascending cumulative sizes, prices non-improving with depth
     uint256 nonce;     // depth nonce, strictly increasing per (mm, tokenIn, tokenOut)
-    uint256 timestampMs; // unix milliseconds the maker priced it; the age origin for widening
+    uint256 timestampMs; // unix milliseconds the maker priced it; validated against the chain clock
     uint256 expiresAt; // unix seconds; wall-time TTL on the signed ladder
 }
 
@@ -58,7 +60,7 @@ struct OffsetLadder {
     Rung[] rungs;               // ascending cumulative sizes, offsets non-decreasing with depth
     uint256 nonce;              // depth nonce, shared with price ladders for the same board
     uint256 expiresAt;          // unix seconds; wall-time TTL on the schedule
-    uint256 driftPpmPerSecond;  // offset widening per second of anchor age; 0 for none
+    uint256 driftPpmPerBlock;   // offset widening per block since the anchor's commit; 0 for none
 }
 
 struct AnchorEntry {
@@ -81,8 +83,8 @@ struct BoardControls {
     address tokenIn;                // pair token in
     address tokenOut;               // pair token out
     uint256 nonce;                  // controls nonce, its own sequence
-    uint256 blockCap;               // most tokenIn one block may fill from this board; 0 for no cap
-    uint256 widenPpmPerSqrtSecond;  // extra discount per square root of a second of quote age; 0 for none
+    uint256 blockCap;               // most tokenIn one block may fill; 0 = the current version's depth
+    uint256 widenPpmPerSqrtBlock;   // extra discount per square root of a block of quote age; 0 for none
     uint256 premiumPpm;             // extra discount inside the premium window; 0 for none
     uint256 premiumBlocks;          // blocks the premium covers after a commit; 0 for none
     uint256 expiresAt;              // unix seconds; the message cannot be committed after this
@@ -93,10 +95,19 @@ Type strings, verbatim from the contracts:
 
 ```
 PriceLadder(address mm,address provider,address tokenIn,address tokenOut,Level[] levels,uint256 nonce,uint256 timestampMs,uint256 expiresAt)Level(uint256 size,uint256 price)
-OffsetLadder(address mm,address provider,address tokenIn,address tokenOut,Rung[] rungs,uint256 nonce,uint256 expiresAt,uint256 driftPpmPerSecond)Rung(uint256 size,uint256 offsetPpm)
+OffsetLadder(address mm,address provider,address tokenIn,address tokenOut,Rung[] rungs,uint256 nonce,uint256 expiresAt,uint256 driftPpmPerBlock)Rung(uint256 size,uint256 offsetPpm)
 AnchorBatch(address mm,AnchorEntry[] entries)AnchorEntry(address tokenIn,address tokenOut,uint256 price,uint256 timestampMs,uint256 ttl,uint256 skewPpm,uint256 reverseSkewPpm)
-BoardControls(address mm,address tokenIn,address tokenOut,uint256 nonce,uint256 blockCap,uint256 widenPpmPerSqrtSecond,uint256 premiumPpm,uint256 premiumBlocks,uint256 expiresAt)
+BoardControls(address mm,address tokenIn,address tokenOut,uint256 nonce,uint256 blockCap,uint256 widenPpmPerSqrtBlock,uint256 premiumPpm,uint256 premiumBlocks,uint256 expiresAt)
 ```
+
+Typehashes, `keccak256` of the strings above:
+
+| Type | Typehash |
+|---|---|
+| `PriceLadder` | `0xaf4583b71fba496981e00ec6e661334662b429a4867c320d6a5580eab2b019e5` |
+| `OffsetLadder` | `0x7b0c7919579b71d01b4608b2f3e196bbcb9a822f3308bbb01d1d4b30b7bebbe4` |
+| `AnchorBatch` | `0xf34f3492310ed624f59e219ac786487e04cdf3fa8a1fe3ec81829f4101cd7c32` |
+| `BoardControls` | `0xf6c5eb3ee653fbcf3747f5f7a1788b589aca8cd98e65968f01120e57ada581f2` |
 
 With a standard EIP-712 library (viem or ethers `signTypedData`) the `types` object is:
 
@@ -114,7 +125,7 @@ const types = {
     { name: "mm", type: "address" }, { name: "provider", type: "address" },
     { name: "tokenIn", type: "address" }, { name: "tokenOut", type: "address" },
     { name: "rungs", type: "Rung[]" }, { name: "nonce", type: "uint256" },
-    { name: "expiresAt", type: "uint256" }, { name: "driftPpmPerSecond", type: "uint256" },
+    { name: "expiresAt", type: "uint256" }, { name: "driftPpmPerBlock", type: "uint256" },
   ],
   AnchorEntry:  [
     { name: "tokenIn", type: "address" }, { name: "tokenOut", type: "address" },
@@ -126,12 +137,12 @@ const types = {
   BoardControls: [
     { name: "mm", type: "address" }, { name: "tokenIn", type: "address" },
     { name: "tokenOut", type: "address" }, { name: "nonce", type: "uint256" },
-    { name: "blockCap", type: "uint256" }, { name: "widenPpmPerSqrtSecond", type: "uint256" },
+    { name: "blockCap", type: "uint256" }, { name: "widenPpmPerSqrtBlock", type: "uint256" },
     { name: "premiumPpm", type: "uint256" }, { name: "premiumBlocks", type: "uint256" },
     { name: "expiresAt", type: "uint256" },
   ],
 } as const;
-const domain = { name: "PropAMMExecutor", version: "2", chainId, verifyingContract: executor };
+const domain = { name: "PropAMMExecutor", version: "1", chainId, verifyingContract: executor };
 ```
 
 Sign the anchor message with `primaryType: "AnchorBatch"`: one signature covers every entry, so nobody can add, drop or alter an entry without invalidating it. Neither the anchor nor the controls carry a `provider`: the provider is bound by the depth message they apply to. An anchor entry carries a `ttl` in place of `expiresAt`: it lives until `timestampMs / 1000 + ttl`. A controls message's `expiresAt` is a commit deadline, not a lifetime: once committed, controls hold until a fresher controls nonce replaces them.
@@ -150,17 +161,17 @@ The stream rejects a message that fails any of these, and the executor skips one
 | sizes strictly ascending, first size above zero, every size fits `uint128` | ladders |
 | prices above zero, each at most the previous price, every price fits `uint128` | price ladders |
 | offsets at least the previous offset and below `1_000_000` | offset ladders |
-| `driftPpmPerSecond` fits `uint32` | offset ladders |
+| `driftPpmPerBlock` fits `uint32` | offset ladders |
 | `tokenIn != 0`, `tokenOut != 0`, `tokenIn != tokenOut` | anchor entries |
 | `price` above zero and fits `uint120` | anchor entries |
 | `timestampMs` fits `uint48` and is at most 30 seconds ahead of the block; the stream refuses one more than 2 seconds ahead | anchor entries |
-| `ttl` from 1 to 16,000; the stream caps it at 3600 | anchor entries |
+| `ttl` from 1 to 13,000; the stream caps it at 3600 | anchor entries |
 | `skewPpm` and `reverseSkewPpm` below `1_000_000` | anchor entries |
 | `timestampMs / 1000 + ttl` in the future at commit time | anchor entries |
 | 1 to 32 entries, at most one per pair | anchor messages (stream only) |
 | every entry names a pair registered for you, in either direction | anchor messages (stream only) |
 | `nonce` fits `uint48` | controls |
-| `blockCap` fits `uint128`, `widenPpmPerSqrtSecond` fits `uint32`, `premiumPpm` below `1_000_000`, `premiumBlocks` fits `uint16` | controls |
+| `blockCap` fits `uint128`, `widenPpmPerSqrtBlock` fits `uint32`, `premiumPpm` below `1_000_000`, `premiumBlocks` fits `uint16` | controls |
 | `expiresAt` fits `uint40` and is not past at commit time (`ControlsExpired()`, the nonce is not consumed); the stream also refuses one more than an hour ahead | controls |
 | signature verifies for `mm` under the executor's domain for `chainId` | all |
 | `provider` equals the provider registered for you on that pair | ladders (stream only) |
@@ -177,15 +188,18 @@ The stream rejects a message that fails any of these, and the executor skips one
 - The rule holds after expiry too: an older nonce never comes back. To restore a quote, sign it again with a fresh nonce.
 - Never re-sign the same nonce to refresh a quote; it will be skipped. Sign a fresh nonce or rely on the TTL.
 - Any strictly increasing sequence works for the depth and controls nonces. Millisecond timestamps fit both limits (the `uint48` limit holds millisecond timestamps for thousands of years); microsecond and nanosecond timestamps do not. A per-board counter works as well. The nonces do not need to be related. Nonce spaces are per board, so the same value may be reused across pairs and directions in one tick.
-- An anchor's `timestampMs` is both the time you priced it and its ordering key, so it must be a real unix millisecond timestamp: drift and age-based widening count from it, and its expiry is `timestampMs / 1000 + ttl`. Two anchors for the same pair in the same millisecond need distinct values; add one to the later.
-- A price ladder's `timestampMs` is the origin its widening counts from, so set it to the time you priced the ladder, not the time you signed or sent it: a ladder committed late still ages from when you priced it. It is not an ordering key; the depth nonce orders ladders.
-- A depth commit resets the meter to zero. Re-sign the offset ladder only when the shape or the provider changes or when consumed depth should re-open; move the price with anchors.
+- An anchor's `timestampMs` is both the time you priced it and its ordering key, so it must be a real unix millisecond timestamp: its expiry is `timestampMs / 1000 + ttl`. Drift and widening do not count from it; they count blocks from the block the anchor is committed in. Two anchors for the same pair in the same millisecond need distinct values; add one to the later.
+- A price ladder's `timestampMs` is the time you priced it, validated against the chain clock (above zero, at most 30 seconds ahead of the block, not after `expiresAt`). Widening counts blocks from the block the ladder is committed in. It is not an ordering key; the depth nonce orders ladders.
+- Commit doors are permissionless, so whoever holds a signed message chooses the block it lands in, and that block starts its drift, widening and premium window. The signed TTL (`expiresAt`, an anchor's `ttl`) bounds how long a message can be held. If you turn on drift or widening, sign short TTLs.
+- A depth commit resets the meter to zero. Re-sign the offset ladder only when the shape or the provider changes or when consumed depth should re-open; move the price with anchors. Within one block every depth version shares one per-block budget (see [the meter](#the-meter)), so a re-signed version re-opens depth from the next block, not the current one.
 
 ## The meter
 
 Each board carries one `filled` cursor: cumulative tokenIn consumed in the current depth version. It resets to zero on every accepted depth commit and is untouched by anchor commits. Consecutive fills consume depth cumulatively: fill N+1 starts where fill N ended and pays the deeper levels. Splitting one large trade into many small ones yields exactly what one fill yields, and every fill from every caller and lane counts against the same meter.
 
 The worst case at any depth version is its top size, once. Past that the sweep reverts `LadderDepthExhausted`; nothing can give a version more depth than you signed. The sweep arithmetic is `out += floor(take * price / 1e18)` per consumed level, and your provider is handed that exact total.
+
+A second tally bounds each block. Every fill in a block counts against one per-block budget, across every caller, both lanes and every depth version committed in that block: your signed `blockCap`, or, when you sign none, the current version's top size. A version committed mid-block therefore prices from its own first level but shares the block's budget with the versions before it, instead of adding a second top size. A fresh block re-opens the full budget. If you want more than one top size per block, sign a `blockCap` above it.
 
 Two consequences for how you stream:
 
@@ -199,21 +213,21 @@ An offset board's rung prices are derived at read time:
 ```
 anchor = entry.price on the signed direction, 1e36 / entry.price (rounded down) on the reverse
 skew   = skewPpm on the signed direction, reverseSkewPpm on the reverse
-age    = now - timestampMs / 1000, in whole seconds
-price  = anchor * (1e6 - offsetPpm - driftPpmPerSecond * age - skew) / 1e6, floored
+age    = block.number - the block the anchor was committed in
+price  = anchor * (1e6 - offsetPpm - driftPpmPerBlock * age - skew) / 1e6, floored
 ```
 
-`age` is the whole seconds since the anchor's signed `timestampMs`, measured against the block timestamp. Board controls add their discount to the same sum. Drift is optional: with `driftPpmPerSecond = 0` and no skew the board quotes at exactly `anchor * (1e6 - offset) / 1e6` until the anchor expires, then goes dark. With drift the board keeps quoting between anchor updates at a price that worsens with staleness instead of going dark, and a fresh anchor snaps the discount back to the signed offsets. This lets you choose a longer anchor TTL without leaving a stale price exposed at full width.
+`age` is the number of blocks since the anchor's commit block, so drift steps every block, not every whole second. Board controls add their discount to the same sum. Drift is optional: with `driftPpmPerBlock = 0` and no skew the board quotes at exactly `anchor * (1e6 - offset) / 1e6` until the anchor expires, then goes dark. With drift the board keeps quoting between anchor updates at a price that worsens with staleness instead of going dark, and a fresh anchor snaps the discount back to the signed offsets. This lets you choose a longer anchor TTL without leaving a stale price exposed at full width.
 
 A rung whose total discount reaches `1e6` prices at zero and drops off the end of the board, and every deeper rung with it (offsets never decrease with depth). When the first rung is gone the whole board is dark (`BoardInactive`), not exhausted.
 
-Worked example with two 18-decimal tokens: anchor `2000e18`, first rung `offsetPpm = 500`, `driftPpmPerSecond = 2`, skew zero.
+Worked example with two 18-decimal tokens: anchor `2000e18`, first rung `offsetPpm = 500`, `driftPpmPerBlock = 2`, skew zero.
 
 | Anchor age | Discount | First rung fills at |
 |---|---|---|
-| 0 s | 500 ppm | `2000e18 * 999_500 / 1_000_000 = 1999e18` |
-| 30 s | 500 + 2 * 30 = 560 ppm | `1998.88e18` |
-| 300 s | 500 + 2 * 300 = 1100 ppm | `1997.8e18` |
+| 0 blocks (the commit block) | 500 ppm | `2000e18 * 999_500 / 1_000_000 = 1999e18` |
+| 30 blocks | 500 + 2 * 30 = 560 ppm | `1998.88e18` |
+| 300 blocks | 500 + 2 * 300 = 1100 ppm | `1997.8e18` |
 
 Anchors are per pair. One entry prices both directions: the direction it is signed for at `price`, the reverse at `1e36 / price` rounded down, in your favour. With two 18-decimal tokens, an entry for WETH to USDC at `2000e18` prices USDC to WETH at `1e36 / 2000e18 = 5e14`. Each side carries its own extra discount, `skewPpm` for the signed direction and `reverseSkewPpm` for the reverse, so you can lean one side without moving the other; with both at zero the two sides are exact inverses before offsets. Skew applies only to offset boards; a price ladder ignores anchors.
 
@@ -227,29 +241,39 @@ One optional message per board carries the limits the executor applies to every 
 
 | Field | Units | Effect |
 |---|---|---|
-| `blockCap` | tokenIn, smallest units | The most any single block may fill from this board, counting every caller and both lanes. `0` for no cap |
-| `widenPpmPerSqrtSecond` | ppm per square root of a second | Extra discount of `ceil(sqrt(widenPpmPerSqrtSecond^2 * age))` ppm, where `age` is the quote's age in seconds. `0` for none |
+| `blockCap` | tokenIn, smallest units | The most any single block may fill from this board, counting every caller, both lanes and every depth version. `0` means the current version's top size |
+| `widenPpmPerSqrtBlock` | ppm per square root of a block | Extra discount of `ceil(sqrt(widenPpmPerSqrtBlock^2 * age))` ppm, where `age` is the quote's age in blocks. `0` for none |
 | `premiumPpm` | ppm | Extra discount for the first blocks after you commit depth, an anchor or the controls. `0` for none |
 | `premiumBlocks` | blocks | How many blocks that premium covers, counting the commit block as the first. `0` for none |
 
-The extra discount is `ceil(sqrt(widenPpmPerSqrtSecond^2 * age)) + premiumPpm` inside the premium window and the widening term alone outside it. The widening term is the exact square root rounded up, so it is never thinner than `widenPpmPerSqrtSecond * sqrt(age)`. It applies on top of what the board already prices: it multiplies a price ladder's level prices and adds to an offset ladder's offsets, after drift. On an offset board `age` runs from the anchor's signed `timestampMs`; on a price ladder it runs from the ladder's signed `timestampMs`, or from the commit if that is earlier, so a ladder committed late still ages from when you priced it. Committing controls restarts only the premium window, never the age: controls carry no price, so committing them never makes a stale board look fresh, and widening added to an already old board applies at once. A first level whose total discount reaches `1e6` takes the board dark (`BoardInactive`) rather than quoting at zero, exactly as a drifted-out first rung does.
+The extra discount is `ceil(sqrt(widenPpmPerSqrtBlock^2 * age)) + premiumPpm` inside the premium window and the widening term alone outside it. The widening term is the exact square root rounded up, so it is never thinner than `widenPpmPerSqrtBlock * sqrt(age)`. It applies on top of what the board already prices: it multiplies a price ladder's level prices and adds to an offset ladder's offsets, after drift. On an offset board `age` counts blocks from the anchor's commit block; on a price ladder it counts blocks from the block the ladder was committed in. Committing controls restarts only the premium window, never the age: controls carry no price, so committing them never makes a stale board look fresh, and widening added to an already old board applies at once. A first level whose total discount reaches `1e6` takes the board dark (`BoardInactive`) rather than quoting at zero, exactly as a drifted-out first rung does.
 
-`widenPpmPerSqrtSecond` is not itself capped below `1e6`: what it produces is bounded by the board going dark, which is the intended outcome for a quote old enough for the widening to swallow the price.
+`widenPpmPerSqrtBlock` is not itself capped below `1e6`: what it produces is bounded by the board going dark, which is the intended outcome for a quote old enough for the widening to swallow the price.
 
 ### The block cap is visible before the transaction
 
 The cap is not a revert that integrators discover by failing. `board()` reports `remaining` as the smallest of the depth left in the version, what the block has left under the cap and what your provider's `available` says it can pay, the executor's `quote` returns zero for a size above that, and the venue reads the same number, so the merged book offers you only what you can still fill this block and routes the rest to other makers. A fill that does pass the cap reverts `BlockCapExceeded(blockCap, attempted)`.
 
-The tally is per block and resets with the block, not with a commit. Two lanes and any number of callers share it.
-
-One boundary worth knowing: a cap binds from the block it is committed in. A board carrying no cap keeps no block meter, so fills that already landed earlier in that same block are not charged against a cap armed after them. From the next fill onward the cap is exact.
+The tally is per block and resets with the block, not with a commit. Two lanes, any number of callers and every depth version committed in the block share it. It counts every fill whether or not you signed a cap, so a cap committed mid-block also counts the fills that landed before it in that block.
 
 ### Choosing the numbers
 
-- `blockCap` is the size of one block of adverse flow you accept while your stream is behind. A cap well below the board's top size keeps the ladder deep for ordinary flow and still bounds a single bad block. It is not a substitute for the top size, which bounds the whole depth version.
-- `widenPpmPerSqrtSecond` prices staleness. The square root means the first seconds cost the most in relative terms and a long-dead quote does not run away to absurd numbers: at 100 ppm per square root of a second, a one-second quote widens 100 ppm, a two-second quote 142 ppm, a four-second quote 200 ppm, a twenty-five-second quote 500 ppm.
+- `blockCap` is the size of one block of adverse flow you accept while your stream is behind. A cap well below the board's top size keeps the ladder deep for ordinary flow and still bounds a single bad block. It is not a substitute for the top size, which bounds the whole depth version. Leave it at `0` and the budget is one top size per block.
+- `widenPpmPerSqrtBlock` prices staleness. The square root means the first blocks cost the most in relative terms and a long-dead quote does not run away to absurd numbers: at 100 ppm per square root of a block, a quote one block old widens 100 ppm, two blocks 142 ppm, four blocks 200 ppm, twenty-five blocks 500 ppm.
 - `premiumPpm` with `premiumBlocks` of 1 or 2 prices the race against your own update, so the block in which you move your price is not the cheapest block in which to take you. The window restarts on every anchor commit as well as on depth and controls commits, so a maker that anchors every block or flashblock with `premiumBlocks` of 1 or more quotes with the premium almost continuously. Size `premiumPpm` for that, or leave it at 0 and rely on widening.
 - All three compose with the TTLs and the drift you already sign. Controls narrow a board, they never widen what it offers.
+
+### Per-block values and block time
+
+`blockCap`, `premiumBlocks`, `driftPpmPerBlock` and `widenPpmPerSqrtBlock` count blocks, so pick them for the chain's block time. To convert a per-second intent:
+
+| Field | From a per-second value | Base at 2 s blocks | Base after Denim, 200 ms blocks |
+|---|---|---|---|
+| `driftPpmPerBlock` | `driftPerSecond * blockSeconds` | 50 ppm per second = 100 per block | 50 ppm per second = 10 per block |
+| `widenPpmPerSqrtBlock` | `widenPerSqrtSecond * sqrt(blockSeconds)` | 1000 per sqrt(second) = about 1414 | 1000 per sqrt(second) = about 447 |
+| `blockCap`, `premiumBlocks` | per block as signed | one block is 2 s | one block is 200 ms |
+
+When Base moves to 200 ms blocks, every per-block value means ten times less wall time: drift per second grows 10x and widening per square root of a second about 3.16x. Controls stay in force until a higher nonce replaces them, so a value signed for 2 s blocks over-prices after the fork (safe for you, less competitive) and one signed for 200 ms before the fork under-prices until the fork (unsafe for you). Re-sign controls and offset ladders with a fresh nonce at the fork block. Expiries (`expiresAt`, an anchor's `ttl`) stay in seconds and need no change.
 
 ## Prices are in raw token units
 
@@ -263,7 +287,7 @@ Example, WETH (18 decimals) to USDC (6 decimals) at 2,000 USDC per WETH: `price 
 
 ## TTL guidance
 
-`expiresAt` is unix seconds, must be in the future, and may be at most one hour ahead; the stream rejects anything further out as a likely units mistake (milliseconds instead of seconds). An anchor entry's expiry is `timestampMs / 1000 + ttl`, with `ttl` in seconds and at most 3600 (the executor allows up to 16,000).
+`expiresAt` is unix seconds, must be in the future, and may be at most one hour ahead; the stream rejects anything further out as a likely units mistake (milliseconds instead of seconds). An anchor entry's expiry is `timestampMs / 1000 + ttl`, with `ttl` in seconds and at most 3600 (the executor allows up to 13,000).
 
 `BoardControls` has no TTL once committed. It holds until replaced, so it cannot expire into a gap where the board is suddenly uncapped. Its `expiresAt` is only the last second it can be committed; sign it a few minutes ahead.
 
@@ -282,8 +306,8 @@ A message is committed only while it still has a few seconds of life left, so a 
 | Price ladder past `expiresAt` | Board is dark: `board()` returns no levels and zero `remaining`, `quote` returns zero, `fill` reverts `BoardInactive`, the venue skips the maker and `isActive` drops to false if no other maker is live. A same or older nonce cannot bring it back; a fresher signed ladder can. |
 | Offset ladder past `expiresAt`, anchor fresh | Dark the same way. Only a new offset ladder (fresher depth nonce) makes it live again; that resets the meter. |
 | Anchor past `timestampMs / 1000 + ttl`, offset ladder fresh | Dark the same way, in both directions of the pair. A fresh anchor (fresher `timestampMs`) makes the board live again immediately, priced off the new anchor, with the meter exactly where it was. |
-| Every rung drifted to a discount of `1e6` or more | Dark (`BoardInactive`), not exhausted. A fresh anchor resets the drift origin. |
-| The block's fill tally has reached `blockCap` | `remaining` reads zero and `quote` returns zero for the rest of the block; the venue routes around you. The next block starts the tally at zero with the same board. |
+| Every rung drifted to a discount of `1e6` or more | Dark (`BoardInactive`), not exhausted. A fresh anchor restarts drift from its own commit block. |
+| The block's fill tally has reached its budget (`blockCap`, or the version's top size when you signed none) | `remaining` reads zero and `quote` returns zero for the rest of the block; the venue routes around you. The next block starts the tally at zero with the same board. |
 | Your provider's `available(tokenOut)` is below what the board would pay | `remaining` shrinks to what the provider can pay and `quote` returns zero for a larger size; the venue routes the rest to other makers. A provider with nothing left reports no room at all. Topping up the provider restores the full board with no new message. |
 | Your provider's `signer()` no longer returns `mm` (you rotated the key) | Dark at once: `board()` reports zero `remaining`, `quote` returns zero, `fill` reverts `ProviderSignerMismatch` and the venue stops quoting you. Stream fresh boards signed by the new key. |
 | You called `setPaused(true)` on the executor | Every board of yours is dark in both lanes until you call `setPaused(false)`; committed messages and meters are untouched. |
@@ -345,7 +369,7 @@ The server answers `{ "type": "ack" }`. It may also send informational frames of
     ],
     "nonce": "1753290000124",
     "expiresAt": "1753293600",
-    "driftPpmPerSecond": "10",
+    "driftPpmPerBlock": "10",
     "signature": "0x…65 bytes…",
     "chainId": 84532
   }
@@ -387,7 +411,7 @@ The server answers `{ "type": "ack" }`. It may also send informational frames of
     "tokenOut": "0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df",
     "nonce": "88214",
     "blockCap": "5000000000000000000",
-    "widenPpmPerSqrtSecond": "100",
+    "widenPpmPerSqrtBlock": "100",
     "premiumPpm": "500",
     "premiumBlocks": "1",
     "expiresAt": "1753290300",
@@ -405,17 +429,17 @@ The server answers `{ "type": "ack" }`. It may also send informational frames of
 | `levels[].size`, `rungs[].size` | uint128 as string | Cumulative tokenIn depth, strictly ascending |
 | `levels[].price` | uint128 as string | 1e18-scaled tokenOut per tokenIn, non-increasing with depth |
 | `rungs[].offsetPpm` | string | Discount below the anchor in ppm, non-decreasing with depth, below 1e6 |
-| `driftPpmPerSecond` | uint32 as string | Offset widening per second of anchor age; `"0"` disables drift |
+| `driftPpmPerBlock` | uint32 as string | Offset widening per block since the anchor's commit; `"0"` disables drift |
 | `nonce` | string | Depth nonce (uint48) for ladders, controls nonce (uint48) for controls; strictly increasing per board |
-| `timestampMs` | unix milliseconds as string | Price ladders only. When the maker priced the ladder; the origin its widening ages from. Above zero, at most 30 seconds ahead, not after `expiresAt` |
+| `timestampMs` | unix milliseconds as string | Price ladders only. When the maker priced the ladder. Above zero, at most 30 seconds ahead, not after `expiresAt` |
 | `expiresAt` | unix seconds as string | Ladders and controls. uint40; at most one hour ahead. On a ladder the TTL of the board; on controls the last second the message can be committed |
 | `entries` | array | Anchors only. 1 to 32 entries, at most one per pair |
 | `entries[].price` | uint120 as string | Anchor reference price for the signed direction, positive |
-| `entries[].timestampMs` | unix milliseconds as string | When the maker priced the anchor; the drift origin and the pair's ordering key. uint48 |
+| `entries[].timestampMs` | unix milliseconds as string | When the maker priced the anchor; the pair's ordering key and the start of its `ttl`. uint48 |
 | `entries[].ttl` | seconds as string | The anchor lives `ttl` seconds after `timestampMs`; 1 to 3600 |
 | `entries[].skewPpm`, `entries[].reverseSkewPpm` | string | Extra discount on the signed side and on the reverse side, ppm, below `1e6`; `"0"` disables |
-| `blockCap` | uint128 as string | Controls only. Most tokenIn one block may fill; `"0"` for no cap |
-| `widenPpmPerSqrtSecond`, `premiumPpm` | uint32 as string | Controls only. Extra discount terms in ppm, below `1e6`; `"0"` disables |
+| `blockCap` | uint128 as string | Controls only. Most tokenIn one block may fill; `"0"` means the current version's top size |
+| `widenPpmPerSqrtBlock`, `premiumPpm` | uint32 as string | Controls only. Extra discount terms in ppm, below `1e6`; `"0"` disables |
 | `premiumBlocks` | uint16 as string | Controls only. Blocks the premium covers; `"0"` disables |
 | `signature` | hex | 65-byte EIP-712 signature by `mm` |
 | `chainId` | number | The chain the board lives on |
@@ -439,14 +463,14 @@ An `ack` means the message was validated and stored; the network commits it when
 One offset ladder, then an anchor message every second with one entry for the pair. Only the anchor is re-signed; the depth nonce does not move, so the meter is preserved across every price tick.
 
 ```
-t = 0    offsets    nonce 1753290000124   rungs [(1e18, 1000 ppm), (3e18, 2500 ppm)]   drift 10   expiresAt t + 1800
+t = 0    offsets    nonce 1753290000124   rungs [(1e18, 1000 ppm), (3e18, 2500 ppm)]   drift 10 per block   expiresAt t + 1800
 t = 0    anchor     timestampMs 1000 * t            price 2000e18     ttl 15
 t = 1    anchor     timestampMs 1000 * (t + 1)      price 2000.4e18   ttl 15
 t = 2    anchor     timestampMs 1000 * (t + 2)      price 1999.9e18   ttl 15
 ...
 ```
 
-With the board committed and a fill of 0.5 tokenIn at `t = 5` against the anchor from `t = 2` (age 3 s, discount `1000 + 10 * 3 = 1030` ppm), the first rung fills at `1999.9e18 * 998_970 / 1_000_000` and the meter reads `0.5e18`. Every later anchor re-prices the remaining `2.5e18` of depth, and the reverse direction's board if you quote it; none of them resets either meter. When you want the full `3e18` back, sign a new offset ladder with a fresher depth nonce.
+With the board committed and a fill of 0.5 tokenIn three blocks after the anchor from `t = 2` was committed (age 3 blocks, discount `1000 + 10 * 3 = 1030` ppm), the first rung fills at `1999.9e18 * 998_970 / 1_000_000` and the meter reads `0.5e18`. Every later anchor re-prices the remaining `2.5e18` of depth, and the reverse direction's board if you quote it; none of them resets either meter. When you want the full `3e18` back, sign a new offset ladder with a fresher depth nonce.
 
 ## Verifying onchain
 
@@ -455,5 +479,5 @@ Everything the network commits is public state on the executor and readable thro
 - `executor.board(mm, tokenIn, tokenOut)` returns `(sizes, prices, filled, remaining, expiresAt, nonce, anchorNonce, mode)`: the levels a fill prices at right now (offset boards resolved against the anchor and drift), the meter, remaining depth, the effective expiry, the depth nonce, `anchorNonce` (the pair's latest `timestampMs`) and the form (`1` price ladder, `2` offset ladder, `0` never committed).
 - `venue.board(mm, tokenIn, tokenOut)` returns the first five of those.
 - `executor.quote(mm, tokenIn, tokenOut, amountIn)` returns what a fill would deliver right now, or zero when the board is dark or paused, your provider no longer names you as its signer, the board cannot cover the size, the size is above what the block has left under your cap, or the output is above what your provider's `available` reports.
-- `executor.controls(mm, tokenIn, tokenOut)` returns `(blockCap, widenPpmPerSqrtSecond, premiumPpm, premiumBlocks, controlsNonce, filledThisBlock, lastCommitBlock, committedAt)`: your limits as stored, how much this block has already filled, the block the premium window runs from and, on a price board, the age origin in unix seconds.
+- `executor.controls(mm, tokenIn, tokenOut)` returns `(blockCap, widenPpmPerSqrtBlock, premiumPpm, premiumBlocks, controlsNonce, filledThisBlock, lastCommitBlock, committedBlock)`: your limits as stored (`blockCap` reads `0` when you signed none), how much this block has already filled, the block of the latest depth or controls commit (the premium window runs from it and from the anchor's commit block) and the block of the latest depth commit, a price board's age origin.
 - Events: `LadderCommitted`, `OffsetsCommitted`, `AnchorCommitted` (one per accepted entry, naming the signed direction) and `ControlsCommitted` when a message is accepted onchain; `CommitRejected(mm, tokenIn, tokenOut, kind, reason)` when a fresher message is refused on its own; `MMFillExecuted(mmProvider, mmSigner, receiver, tokenIn, tokenOut, amountIn, amountOut, avgPrice, filledAfter, caller, nonce, anchorNonce)` per fill, with `filledAfter` the meter after the fill, `caller` the address that called `fill` (the venue, a settlement or a direct taker), `nonce` the depth version and `anchorNonce` the pair anchor's `timestampMs` that priced it; `MakerPaused(mm, paused)` when you pause or resume.
