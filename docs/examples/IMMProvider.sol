@@ -18,11 +18,12 @@ pragma solidity 0.8.30;
 ///
 ///      Amounts:
 ///        - The executor passes `amountIn`, the sweep's average price and the exact swept
-///          `amountOut`; the provider pulls `amountIn` from the executor, delivers its output of
-///          `tokenOut` to `receiver` and returns what it delivered.
-///        - The executor imposes no output cap. The taker's floor (a router's or an intent's
-///          `minAmountOut`) is enforced at settlement, so an under-priced fill reverts rather than
-///          shortchanging the taker.
+///          `amountOut`; the provider pulls `amountIn` from the executor and delivers at least
+///          `amountOut` of `tokenOut` to `receiver`.
+///        - The executor measures `receiver` around the call and reverts the fill when it gained
+///          less than `amountOut` (`FillLegFailed` carrying `DeliveryShortfall`): a provider can
+///          pay more than the board, never less. The return value is not read, so a provider that
+///          returns nothing is measured like any other.
 interface IMMProvider {
     /// @notice The address whose key signs the maker's board messages. An EOA for ECDSA makers,
     ///         or a contract for EIP-1271 makers (multisig, threshold signatures, custom
@@ -63,9 +64,10 @@ interface IMMProvider {
     /// @dev The executor sizes every board to this, so `board`, `quote` and the venue never
     ///      advertise depth the provider cannot pay and a router is never quoted into a revert.
     ///      Must be a cheap view: the executor reads it with a fixed gas budget and treats a
-    ///      revert, an out-of-gas or a short return as unbounded, so a faulty provider can only
-    ///      lose its own sizing, never break another maker's fills. A provider whose output comes
-    ///      from an external venue rather than held inventory may return `type(uint256).max`.
+    ///      revert, an out-of-gas or a short return as unbounded, so a faulty provider overstates
+    ///      its own depth; its fills then fail, and the venue drops it from that swap and routes
+    ///      around it. A provider whose output comes from an external venue rather than held
+    ///      inventory may return `type(uint256).max`.
     function available(address token) external view returns (uint256);
 
     /// @notice Atomic fill: pull `amountIn` of `tokenIn` from `msg.sender` (the executor), deliver
@@ -75,10 +77,9 @@ interface IMMProvider {
     ///      silent no-op is not safe.
     ///
     ///      `amountOut` is the exact order-book sweep total the executor computed across the
-    ///      board's tranches, so a provider that follows the board delivers precisely that.
-    ///      `anchorPrice` is the sweep's volume-weighted average, for providers that shape an
-    ///      order on an external venue from a price; a basic provider ignores it. The executor
-    ///      imposes no cap; the taker's floor is enforced at settlement.
+    ///      board's tranches, and the least the receiver must gain: the executor measures it and
+    ///      reverts below it. `anchorPrice` is the sweep's volume-weighted average, for providers
+    ///      that shape an order on an external venue from a price; a basic provider ignores it.
     ///
     /// @param tokenIn     Token being received (the executor substitutes WETH for native).
     /// @param tokenOut    Token being sent (the executor substitutes WETH for native).
@@ -86,7 +87,8 @@ interface IMMProvider {
     /// @param anchorPrice The sweep's average price, 1e18-scaled tokenOut per tokenIn.
     /// @param amountOut   The exact swept output the provider is expected to deliver.
     /// @param receiver    Destination of `tokenOut`.
-    /// @return delivered  Amount of `tokenOut` actually sent to `receiver`.
+    /// @return delivered  Amount of `tokenOut` sent to `receiver`; informational, the executor
+    ///                    measures instead.
     function executeSwap(
         address tokenIn,
         address tokenOut,

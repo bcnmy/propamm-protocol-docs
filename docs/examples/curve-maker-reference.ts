@@ -24,7 +24,7 @@ import WebSocket from "ws";
 // ---------------------------------------------------------------- config
 const ENDPOINT = "wss://propamm-staging.biconomy.io/v1/ws"; // Base Sepolia; production: wss://propamm.biconomy.io/v1/ws
 const CHAIN_ID = 84532; // Base Sepolia
-const EXECUTOR = "0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC"; // same address on every chain
+const EXECUTOR = "{{EXECUTOR}}"; // same address on every chain
 const TOKEN_X = "0x8b414aD7005EeFd315aF2A16538885Eae229bab7"; // MockWETH, 18 decimals
 const TOKEN_Y = "0xAbbdbbbd6d56593A9c5656c06cB30D61E4a544Df"; // MockUSDC, 18 decimals
 const PROVIDER = "0xYourInventoryContract"; // where fills pull your inventory
@@ -83,7 +83,7 @@ async function curveToLadder(tokenIn: string, tokenOut: string, cap: bigint): Pr
 // ------------------------------------------------------------- sign + stream
 const EIP712_DOMAIN = {
   name: "PropAMMExecutor",
-  version: "2",
+  version: "1",
   chainId: CHAIN_ID,
   verifyingContract: EXECUTOR,
 } as const;
@@ -108,7 +108,7 @@ const LADDER_TYPES = {
 let nonce = BigInt(Date.now()); // any strictly increasing sequence works; the depth nonce fits uint48 (milliseconds do, microseconds do not)
 
 async function sendLadder(ws: WebSocket, tokenIn: string, tokenOut: string): Promise<void> {
-  const timestampMs = BigInt(Date.now()); // when you priced it: the origin any widening ages from
+  const timestampMs = BigInt(Date.now()); // when you priced it; checked against the chain clock (widening counts blocks from the commit)
   const levels = await curveToLadder(tokenIn, tokenOut, CAP_X);
   if (levels.length === 0) return; // nothing servable right now: publish nothing
   nonce += 1n;
