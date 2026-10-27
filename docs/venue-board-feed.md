@@ -40,6 +40,7 @@ An example, with one of the boards on Base at block 52847598:
   "venue": "0x0000009E5F98cDB4dd1E1d2E15B220217c88B3b8",
   "executor": "0x0000006f9bBA066e4efda2e0CAbE4FF8cf9030aC",
   "blockNumber": "52847598",
+  "stateBlock": "52847598",
   "timestamp": "1792484543",
   "nextTimestamp": "1792484545",
   "feeBps": 0,
@@ -70,7 +71,8 @@ Here WETH has 18 decimals and USDC 6, so `2385958388` is 2,385.958388 USDC per W
 
 | Field | Meaning |
 |---|---|
-| `blockNumber`, `timestamp` | the block every committed board was read at, and its timestamp in unix seconds; committed boards are priced for it |
+| `blockNumber`, `timestamp` | the last sealed block the feed read the chain at, and its timestamp in unix seconds; committed boards read there are priced for it |
+| `stateBlock` | the block the boards are as of: `blockNumber`, or one block later when a board landed in a flashblock after that read; every committed board is onchain from `stateBlock` on |
 | `nextTimestamp` | the next block's timestamp, from the last two blocks' spacing; pending boards are priced for it, since that is the earliest block they land in |
 | `feeBps` | the venue's protocol fee: `out - out * feeBps / 10000` on the merged output |
 | `makers` | registered makers in registry order; the venue breaks price ties in this order |
@@ -81,7 +83,7 @@ Each entry of `boards`:
 | Field | Meaning |
 |---|---|
 | `mm`, `tokenIn`, `tokenOut` | maker and direction |
-| `committed` | `true`: the board onchain at `blockNumber`; `false`: signed, not yet onchain |
+| `committed` | `true`: the board onchain as of `stateBlock` (when `lastCommitBlock` is after `blockNumber`, it landed in a flashblock after the chain read and is priced for `nextTimestamp`); `false`: signed, not yet onchain |
 | `lastCommitBlock` | block of the board's last commit; `null` when pending |
 | `mode` | `prices`, `offsets` or `none` |
 | `sizes` | cumulative `tokenIn` amounts, one per level |
@@ -107,7 +109,7 @@ for each level i:
     if left == 0: break
 ```
 
-Across makers, take the best next level first, ties in `makers` order, and stop each maker at its `remaining`. Drop an allocation whose output rounds to zero. Then take the protocol fee off the total. `quote()` onchain runs the same steps, so you can check your implementation against it at `blockNumber`.
+Across makers, take the best next level first, ties in `makers` order, and stop each maker at its `remaining`. Drop an allocation whose output rounds to zero. Then take the protocol fee off the total. `quote()` onchain runs the same steps, so you can check your implementation against it at `stateBlock`, once that block is sealed.
 
 ## Committed or pending
 
