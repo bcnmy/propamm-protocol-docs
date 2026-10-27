@@ -72,7 +72,7 @@ Here WETH has 18 decimals and USDC 6, so `2385958388` is 2,385.958388 USDC per W
 | Field | Meaning |
 |---|---|
 | `blockNumber`, `timestamp` | the last sealed block the feed read the chain at, and its timestamp in unix seconds; committed boards read there are priced for it |
-| `stateBlock` | the block the boards are as of: `blockNumber`, or one block later when a board landed in a flashblock after that read; every committed board is onchain from `stateBlock` on |
+| `stateBlock` | the block the boards are as of: `blockNumber`, or usually one block later when a board landed in a flashblock after that read; every committed board's signed version is onchain from `stateBlock` on, while `filled` and `remaining` are as of the block the board was read or landed in |
 | `nextTimestamp` | the next block's timestamp, from the last two blocks' spacing; pending boards are priced for it, since that is the earliest block they land in |
 | `feeBps` | the venue's protocol fee: `out - out * feeBps / 10000` on the merged output |
 | `makers` | registered makers in registry order; the venue breaks price ties in this order |
